@@ -69,6 +69,7 @@ def main() -> int:
                 ("switching a finished clip to the gameplay layout finds the webcam", ["tests/test_layout_cam.py"]),
                 ("the gameplay layout, checked on the finished video", ["tests/test_gameplay.py"]),
                 ("saved files survive the computer switching off", ["tests/test_disk.py"]),
+                ("a restart keeps one entry per recording, and damaged notes are rebuilt", ["tests/test_restart.py"]),
                 ("fresh installs: ffmpeg, the speech model, AI errors", ["tests/test_tools.py"]),
                 ("the storage folder: full drive, open, move", ["tests/test_storage.py"]),
                 ("security: visitor address, email addresses, Google sign-in, prompts", ["tests/test_hardening.py"]),

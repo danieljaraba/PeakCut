@@ -150,7 +150,7 @@ def job_dir(jid) -> Path:
     return Path(_jobs[jid]["dir"])
 
 
-HIDDEN = ("dir", "user", "source_path", "recover", "candidates", "heatmap", "chapters")   # the last three: for the work, not the page
+HIDDEN = ("dir", "user", "source_path", "recover", "paused_at", "part_clock", "candidates", "heatmap", "chapters")   # the last three: for the work, not the page
 
 
 def public(job) -> dict:
@@ -200,11 +200,161 @@ def _remap(path, folder: Path):
     return path
 
 
+def _read_json(f: Path):
+    """A small saved file, or None when it cannot be read: missing, empty, cut short, or full of zeros
+    (what a computer switching off at the wrong moment can leave behind)."""
+    try:
+        return json.loads(Path(f).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def read_words(d) -> list:
+    """The transcript saved with a video or recording. A damaged one counts as no words, so the clips still
+    show and can still be made again (just without captions until there are words)."""
+    words = _read_json(Path(d) / "words.json")
+    return words if isinstance(words, list) else []
+
+
+def _whole(f: Path, start: bytes = b"") -> bool:
+    """Is this file all there? Only its first and last bytes are looked at, which is quick: a file spoilt by a
+    sudden shutdown is full of zeros, or does not begin the way that kind of file always begins."""
+    try:
+        size = f.stat().st_size
+        if size < 16:
+            return False
+        with open(f, "rb") as fh:
+            head = fh.read(4096)
+            fh.seek(max(0, size - 4096))
+            tail = fh.read()
+    except OSError:
+        return False
+    return head.strip(b"\0") != b"" and tail.strip(b"\0") != b"" and (not start or start in head[:16])
+
+
+def _stamp(jid: str, folder: Path) -> float:
+    """When a job was made: its id starts with the date and time; otherwise the folder's own date."""
+    try:
+        return time.mktime(time.strptime(jid[:15], "%Y%m%d-%H%M%S"))
+    except ValueError:
+        try:
+            return folder.stat().st_mtime
+        except OSError:
+            return time.time()
+
+
+def _rebuild(f: Path, uid: str):
+    """The saved notes of a video or recording (job.json) cannot be read. Make them again from what is still in
+    its folder, so its clips show again: each clip's own notes (clips/clipNNN.json) and its files.
+
+    Who it belongs to and which creator it is for come from where the folder is, never from what any file says.
+    The damaged notes are kept next to it as job.json.danado. Returns None when there is nothing worth showing."""
+    d = f.parent
+    jid = d.name
+    if d.parent.name == "jobs":                                    # users/<user>/jobs/<id>
+        kind, creator = "video", None
+    elif d.parent.name in ("live", "videos"):                      # users/<user>/creators/<creator>/live|videos/<id>
+        kind, creator = ("live" if d.parent.name == "live" else "video"), d.parent.parent.name
+    else:
+        return None
+    settings = None
+    if creator:
+        with ctx.as_user(uid):
+            try:
+                settings = creators.get(creator)
+            except Exception:  # noqa: BLE001
+                settings = None
+    settings = settings or {}
+    created = _stamp(jid, d)
+    whole = None                                                    # a plain video's own downloaded file
+    if kind == "video":
+        found = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".m4a")]
+        whole = max(found, key=lambda p: p.stat().st_size, default=None)
+    names = sorted({p.name.split(".")[0] for p in (d / "clips").glob("clip*.*")}) if (d / "clips").is_dir() else []
+    clips, size = [], None
+    for name in names:
+        if not name[4:].isdigit():
+            continue
+        meta = _read_json(d / "clips" / f"{name}.json")
+        meta = meta if isinstance(meta, dict) else {}
+        mp4, piece, cover = (d / "clips" / f"{name}{x}" for x in (".mp4", ".src.ts", ".jpg"))
+        mp4_ok, piece_ok = mp4.is_file() and _whole(mp4, b"ftyp"), piece.is_file() and _whole(piece)
+        if not (mp4_ok or piece_ok or whole):
+            continue                                                # nothing is left of this clip
+        info = None
+        for p in ([piece] if piece_ok else []) + ([mp4] if mp4_ok else []):
+            try:
+                info = media.probe(p)
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        size = size or info
+        try:
+            start, end = float(meta.get("start") or 0.0), float(meta.get("end") or 0.0)
+        except (TypeError, ValueError):
+            start = end = 0.0
+        if end <= start:
+            start, end = 0.0, round(min((info or {}).get("duration") or 30.0, 180.0), 2)
+        c = {"id": name, "start": start, "end": end, "score": meta.get("score") or 0, "category": "other",
+             "hook": str(meta.get("hook") or ""), "title": str(meta.get("title") or "Recovered clip"),
+             "description": str(meta.get("description") or ""),
+             "hashtags": meta.get("hashtags") if isinstance(meta.get("hashtags"), list) else [],
+             "highlight_words": [], "reason": "Recovered after its notes were damaged.",
+             "style": settings.get("style") or DEFAULTS["style"], "layout": settings.get("layout") or DEFAULTS["layout"],
+             "captions": settings.get("captions", True), "version": 1, "made_at": created, "error": None}
+        if piece_ok:
+            # Where this saved piece starts on the stream's clock was only written in the lost notes. The clip
+            # was cut with the same few seconds kept either side, so it sits in the middle of the piece.
+            dur = (info or {}).get("duration") or (end - start)
+            off = round(max(0.0, start - max(0.0, (dur - (end - start)) / 2)), 2)
+            c.update(src=str(piece), src_offset=off, src_end=round(off + dur, 2))
+            c["start"], c["end"] = max(c["start"], c["src_offset"]), min(c["end"], c["src_end"])
+        if mp4_ok:
+            c.update(status="done", file=mp4.name, cover=cover.name if cover.is_file() and _whole(cover) else None)
+        else:
+            c.update(status="error", error="Press Save and re-make", version=0)
+        clips.append(c)
+    if not clips and not whole:
+        return None
+    # Pieces of stream still waiting in the buffer mean it was recording when the computer went off: it is then
+    # treated like any recording stopped by a restart, and picked up again if the stream is still on.
+    recording = kind == "live" and (d / "buffer").is_dir() and any((d / "buffer").glob("*.ts"))
+    job = {"id": jid, "user": uid, "kind": kind, "creator": creator, "dir": str(d), "created": created,
+           "source": {"type": "live" if kind == "live" else "file", "url": settings.get("channel", "") if kind == "live" else "",
+                      "name": f"{settings.get('name') or creator} live" if kind == "live" else "Recovered video"},
+           "options": {**DEFAULTS, **{k: settings[k] for k in ("max_clips", "min_len", "max_len", "style", "layout", "captions")
+                                      if k in settings}},
+           "status": "live" if recording and settings.get("channel") else "done",
+           "stage": "Recovered after its notes were damaged", "progress": 1.0,
+           "title": "", "uploader": settings.get("name", ""), "duration": max([c["end"] for c in clips] + [0.0]),
+           "clips": clips, "error": None, "ai": {}, "width": (size or {}).get("width", 1280),
+           "height": (size or {}).get("height", 720)}
+    if whole:
+        job["source_path"] = str(whole)
+    try:
+        shutil.copyfile(f, f.with_name("job.json.danado"))
+    except OSError:
+        pass
+    save(job)
+    if creator:
+        with ctx.as_user(uid):
+            try:
+                creators.log(creator, "Recording notes were damaged and rebuilt")
+            except Exception:  # noqa: BLE001
+                pass
+    return job
+
+
 def _load_file(f: Path, uid: str):
     try:
-        job = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+        last_saved = f.stat().st_mtime
+    except OSError:
         return
+    job = _read_json(f)
+    if not isinstance(job, dict) or not job.get("id") or not isinstance(job.get("clips", []), list):
+        job = _rebuild(f, uid)
+        if not job:
+            return
     job.update(dir=str(f.parent), user=uid)
     job.setdefault("kind", "video")
     job.setdefault("creator", None)
@@ -217,7 +367,9 @@ def _load_file(f: Path, uid: str):
         # Picked up again as soon as the server is back (jobs.start), from the last finished part of the transcript.
         job.update(status="queued", stage="Picking up where it stopped", error=None, resume=True)
     if job.get("status") == "live":
-        job.update(status="done", stage="Recording paused by a server update", was_live=True)
+        # Picked up again in this same entry if the stream is still on (live.start). paused_at is when it was last
+        # saved while recording, so a stream that ended hours ago is not taken for the one now on.
+        job.update(status="done", stage="Recording paused by a server update", was_live=True, paused_at=last_saved)
     buffered = job.get("kind") == "live" and any((f.parent / "buffer").glob("*.ts"))
     for c in job.get("clips", []):
         c.setdefault("captions", job["options"]["captions"])
@@ -724,10 +876,7 @@ def _run_job(job):
         job["transcript_from"] = "youtube" if yt else "own"
         job["lang"] = yt[1] if yt else ""          # the language spoken, when YouTube says (decides the captions)
     if resuming:
-        try:
-            words = json.loads((d / "words.json").read_text(encoding="utf-8"))
-        except ValueError:
-            words = []
+        words = read_words(d)
         done_blocks = min(int(job.get("done_blocks", 0)), len(blocks)) if words else 0
         tokens, model = int((job.get("ai") or {}).get("tokens", 0)), (job.get("ai") or {}).get("model")
         if done_blocks < len(blocks):     # words past the last finished part are transcribed again
@@ -912,9 +1061,7 @@ def _worker(quick_only=False):
                 _run_job(job)
             else:
                 clip = next(c for c in job["clips"] if c["id"] == cid)
-                words = []
-                if clip.get("captions", True):
-                    words = json.loads((Path(job["dir"]) / "words.json").read_text(encoding="utf-8"))
+                words = read_words(job["dir"]) if clip.get("captions", True) else []
                 render_one(job, clip, words)
         except Exception as e:  # noqa: BLE001
             (Path(job["dir"]) / "error.log").write_text(traceback.format_exc(), encoding="utf-8")

@@ -1,6 +1,7 @@
 """Live sessions: record a stream into a rolling buffer, transcribe as it goes, let the AI pick clips."""
 import collections
 import json
+import math
 import re
 import socket
 import ssl
@@ -24,6 +25,7 @@ QUIET_MAX = 600       # ...but only ask the AI when something happened, or at mo
 WINDOW = 240          # seconds of transcript shown to the AI per check
 CHAT_KEEP = 600       # seconds of chat names kept: only the last few minutes are ever read
 SR = 16000
+RESUME_WITHIN = 2 * 3600   # a recording stopped by a restart goes on in the same entry if picked up within this time
 
 
 class NotLive(Exception):
@@ -204,6 +206,41 @@ class Session:
         self.facecam_box = None       # where the webcam is, found once the first clip is made
         self.facecam_checked = False  # the look is made once, even when it finds nothing
         self.ai_busy = 0.0            # when the AI check now running was started, 0 when none is
+        self.clock0 = 0               # the second this recording picked up from after a restart (0: from the start)
+        self.first_part = 1           # the first buffer piece list made by this run (older ones are not read again)
+
+    def carry_on(self):
+        """This recording was running when the studio closed, and the stream is still on: go on in the same entry.
+
+        Everything already made is kept as it is. The session's clock (the seconds of stream heard so far) goes on
+        from the last second recorded before the restart, so the transcript, the loudness, the chat and the new
+        pieces of stream all line up, and new clips get times after the old ones. The minutes missed while the
+        studio was closed are simply not there: the clock jumps over them. New buffer pieces get new names, so
+        old pieces still waiting to be cut into clips are never written over, and it does not matter if they
+        are already gone. Clip names go on from the highest one used."""
+        job = self.job
+        self.words = jobs.read_words(self.dir)
+        loud = jobs._read_json(self.dir / "loud.json")
+        loud = [float(x) for x in loud if isinstance(x, (int, float))] if isinstance(loud, list) else []
+        last = [float(job.get("duration") or 0), float(len(loud))]
+        last += [float(w.get("e") or w.get("s") or 0) for w in self.words[-1:] if isinstance(w, dict)]
+        last += [float(c.get("end") or 0) for c in job["clips"]]
+        sec = int(math.ceil(max(last)))
+        with self.lock:
+            self.clock0 = sec
+            self.samples = self.pending_base = sec * SR
+            self.t_done = self.seg_clock = self.last_check = float(sec)
+            self.db = loud[:sec]      # the rest of the missing seconds is filled in when the first new sound arrives
+        self.part = _last_part(self.buf)
+        self.first_part = self.part + 1
+        self.n = _last_clip_number(job, self.dir)
+        self.started_at = time.time() - sec          # the longest a recording can run counts the time before too
+        self.game = job.get("game") or ""
+        if job.get("facecam"):
+            self.facecam_box, self.facecam_checked = job["facecam"], True
+        old = job.get("live") or {}
+        self.checks, self.skipped, self.rejected, self.tokens = (int(old.get(k) or 0) for k in
+                                                                 ("checks", "skipped", "rejected", "tokens"))
 
     def _ask_ai(self, window=None, why=None, said=None):
         """Ask the AI on its own thread, so a slow answer never stops the recording.
@@ -297,7 +334,7 @@ class Session:
                 info = resolve(url)
             except NotLive as e:
                 fails += 1
-                if self.samples == 0 or fails >= 3:
+                if self.samples <= self.clock0 * SR or fails >= 3:
                     if self.samples == 0:
                         self.job["error"] = f"Could not start recording: {e}"
                     break
@@ -308,6 +345,8 @@ class Session:
             self.part += 1
             with self.lock:
                 self.seg_clock = max(self.seg_clock, self.samples / SR)
+                # where this list of pieces starts on the session clock, so a restart can place its pieces again
+                self.job.setdefault("part_clock", {})[str(self.part)] = round(self.seg_clock, 2)
             p = f"p{self.part:02d}"
             cmd = ingest_cmd(info["urls"], p)
             with open(self.dir / "ffmpeg.log", "ab") as errlog:
@@ -323,6 +362,10 @@ class Session:
                     x = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                     level = float(20 * np.log10(np.sqrt((x ** 2).mean() + 1e-10))) if len(x) else -100.0
                     with self.lock:
+                        if len(self.db) < self.clock0:
+                            # picked up after a restart without the loudness from before: the seconds before
+                            # count as loud as now, so the first minutes do not look like a sudden jump
+                            self.db.extend([level] * (self.clock0 - len(self.db)))
                         self.pending += data
                         self.samples += len(data) // 2
                         self.db.append(level)
@@ -336,7 +379,7 @@ class Session:
     def _scan_segments(self):
         """Pick up buffer pieces ffmpeg has finished writing."""
         with self.lock:
-            for i in range(1, self.part + 1):
+            for i in range(self.first_part, self.part + 1):
                 f = self.buf / f"p{i:02d}.csv"
                 if not f.exists():
                     continue
@@ -404,7 +447,7 @@ class Session:
 
         The crowd is counted as people, not messages: ten people saying "GG" is a reaction, one
         person saying "GG" ten times is a bot."""
-        elapsed = self.samples / SR
+        elapsed = self.samples / SR - self.clock0        # chat is only counted since this run started
         if not self.chat_total or elapsed < 60:
             return False
         avg = self.chat_total / elapsed
@@ -450,6 +493,9 @@ class Session:
             self.t_done = self.pending_base / SR
         self._triggers(words)
         disk.write_text(self.dir / "words.json", json.dumps(self.words))
+        with self.lock:
+            loud = [round(x, 1) for x in self.db]
+        disk.write_text(self.dir / "loud.json", json.dumps(loud))   # kept so a restart can carry on with it
         return True
 
     AUTO_BEFORE, AUTO_AFTER, AUTO_GAP = 30, 20, 60   # seconds of stream sent around a jump; least time between jumps
@@ -461,7 +507,7 @@ class Session:
         sent yet: the AI gets that moment once its transcript is ready, with the half minute before it."""
         with self.lock:
             n = len(self.db)
-            if n < 60:
+            if n - self.clock0 < 60:
                 self.base = {"warming": True}
                 return
             db = np.array(self.db[max(0, n - 190):], dtype=np.float32)
@@ -771,10 +817,11 @@ class Session:
                         self.stop(f"Stopped after {config.MAX_LIVE_HOURS:g} hours, the longest one recording can run")
                 self._scan_segments()
                 busy = self._transcribe_step()
-                if not started and self.samples:
+                if not started and self.samples > self.clock0 * SR:
                     started = True
                     self.job.update(status="live", stage="Recording")
-                    creators.log(cid, f"Recording started: {self.job['title']}")
+                    if not self.clock0:
+                        creators.log(cid, f"Recording started: {self.job['title']}")
                 self._manual_step()
                 # Three ways the AI is asked: on the creator's schedule (every N minutes), and always, when the
                 # stream suddenly gets louder or chat busier, or when someone says "clip".
@@ -830,12 +877,16 @@ def recover(job):
     c = creators.get(job["creator"]) or dict(creators.DEFAULTS)
     s = Session(job, c)
     s.ended, s.end_note = True, "Recording stopped when the studio closed"
-    s.part = len(list(s.buf.glob("p*.csv")))
+    s.part = _last_part(s.buf)
     s.seg_clock = 0.0
     s.csv_seen = {}
+    starts = job.get("part_clock") or {}
     with s.lock:
         for i in range(1, s.part + 1):
             f = s.buf / f"p{i:02d}.csv"
+            if not f.exists():
+                continue
+            s.seg_clock = max(s.seg_clock, float(starts.get(str(i)) or 0))   # known for pieces recorded since this was added
             rows = [r.split(",") for r in f.read_text(encoding="utf-8", errors="ignore").splitlines() if r.count(",") >= 2]
             for name, a, b in (r[:3] for r in rows):
                 try:
@@ -845,18 +896,19 @@ def recover(job):
                 s.segments.append((s.buf / name, s.seg_clock, s.seg_clock + dur))
                 s.seg_clock += dur
             s.csv_seen[i] = len(rows)
-    try:
-        s.words = json.loads((s.dir / "words.json").read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        s.words = []
+    s.words = jobs.read_words(s.dir)
     s.n = len(job["clips"])
     todo = [k for k in job["clips"] if k.get("status") == "queued"]
     for k in todo:
         jobs.submit_live(lambda k=k: s._render(k))
 
     def cleanup():
-        for f in s.buf.glob("*"):
-            f.unlink(missing_ok=True)
+        # Only the pieces from before the restart: if the stream is still on, the same recording may already be
+        # going on in this folder (carry_on), with new pieces of its own.
+        for f in s.buf.glob("p*"):
+            m = re.match(r"^p(\d+)", f.name)
+            if m and int(m.group(1)) <= s.part:
+                f.unlink(missing_ok=True)
         job.pop("recover", None)
         jobs.save(job)
         creators.log(job["creator"], f"Finished {len(todo)} clip(s) from a recording interrupted by a restart")
@@ -883,12 +935,57 @@ def start_session(creator: dict, url=None) -> dict:
     from . import tools
     if tools.missing():
         raise ValueError(tools.HELP)
+    paused = _paused_for(creator["id"])
+    if paused:
+        # This channel was being recorded when the studio closed: carry on in that same entry, with its clips,
+        # instead of making a second one for the same stream.
+        with jobs._lock:
+            for k in ("was_live", "paused_at"):
+                paused.pop(k, None)
+            paused["source"]["url"] = url
+            paused.update(status="live", stage="Picking up the recording again", error=None)
+        s = Session(paused, creator)
+        s.carry_on()
+        jobs.save(paused)
+        s.start()
+        creators.log(creator["id"], "Recording picked up again in the same entry after a restart")
+        return paused
     job = jobs.create({"type": "live", "url": url, "name": f"{creator['name']} live"}, {}, enqueue=False,
                       creator=creator["id"], kind="live")
     job.update(status="live", stage="Connecting to the stream")
     jobs.save(job)
     Session(job, creator).start()
     return job
+
+
+def _paused_for(cid):
+    """This user's recording of this creator that a restart stopped not long ago, or None. One stopped longer ago
+    than RESUME_WITHIN is taken as a stream that is over: it stays finished, and a new stream gets a new entry."""
+    found = None
+    for j in sorted((jobs.get(x["id"]) for x in jobs.list_jobs() if x.get("creator") == cid and x.get("was_live")),
+                    key=lambda j: -(j or {}).get("paused_at", 0)):
+        if not j or j["id"] in SESSIONS:
+            continue
+        if found is None and time.time() - (j.get("paused_at") or 0) < RESUME_WITHIN:
+            found = j
+            continue
+        j.pop("was_live", None)          # too long ago, or an older one: it stays finished
+        j.pop("paused_at", None)
+        jobs.save(j)
+    return found
+
+
+def _last_part(buf: Path) -> int:
+    """The number of the last list of stream pieces in the buffer (p01, p02, ...), 0 when there are none."""
+    return max((int(m.group(1)) for f in buf.glob("p*") if (m := re.match(r"^p(\d+)", f.name))), default=0)
+
+
+def _last_clip_number(job, folder: Path) -> int:
+    """The highest clip number this recording has used, counting files of clips that were deleted, so a new clip
+    never takes the name of an old one."""
+    nums = [int(m.group(1)) for c in job.get("clips", []) if (m := re.match(r"^clip(\d+)$", str(c.get("id", ""))))]
+    nums += [int(m.group(1)) for f in (folder / "clips").glob("clip*") if (m := re.match(r"^clip(\d+)", f.name))]
+    return max(nums, default=0)
 
 
 def _watch_user(uid):
@@ -968,28 +1065,44 @@ def watch_loop():
         time.sleep(max(15, 120 - (time.time() - t0)))
 
 
+def _resume_one(uid, jid) -> bool:
+    """Pick up one recording a restart stopped. True when there is nothing more to do for it (it goes on again in
+    the same entry, or its stream is over, or it was deleted); False to try again shortly."""
+    with ctx.as_user(uid):
+        job = jobs.get(jid)
+        if not job or not job.get("was_live"):
+            return True                      # deleted, or already picked up (auto-record or Start got there first)
+        c = creators.get(job.get("creator"))
+        if not c or active_for(c["id"]):
+            return True
+        try:
+            resolve(normalize(job["source"]["url"]))    # raises NotLive if the stream has ended
+        except NotLive:
+            with jobs._lock:
+                job.pop("was_live", None)
+                job.pop("paused_at", None)
+                job["stage"] = "Stream ended while the studio was closed"
+            jobs.save(job)
+            creators.log(c["id"], "The stream ended while the studio was closed: the recording stays as it was")
+            return True
+        except Exception:  # noqa: BLE001 - the network may not be back yet
+            return False
+        try:
+            start_session(c, job["source"]["url"])     # finds this entry and carries on in it
+        except Exception:  # noqa: BLE001 - e.g. the machine is busy: try again shortly
+            return False
+        return True
+
+
 def _resume_recordings(paused):
-    """Recordings that were running when the server stopped: start recording the same channel again, if the
-    stream is still on. Tried for a few minutes, since the server may come back a little before the network."""
+    """Recordings that were running when the server stopped: carry on recording in the same entry, if the stream
+    is still on. Tried for a few minutes, since the server may come back a little before the network. If it never
+    works, auto-record can still carry on in the same entry for a while (see _paused_for)."""
     time.sleep(10)
     for _ in range(6):
-        left = []
-        for uid, cid, url in paused:
-            with ctx.as_user(uid):
-                try:
-                    c = creators.get(cid)
-                    if not c or active_for(cid):
-                        continue
-                    resolve(normalize(url))      # raises NotLive if the stream has ended: no empty recording is made
-                    start_session(c, url)
-                    creators.log(cid, "Recording picked up again after a server update")
-                except NotLive:
-                    continue                  # the stream ended while the server was away
-                except Exception:  # noqa: BLE001 - try again shortly
-                    left.append((uid, cid, url))
-        if not left:
+        paused = [(uid, jid) for uid, jid in paused if not _resume_one(uid, jid)]
+        if not paused:
             return
-        paused = left
         time.sleep(30)
 
 
@@ -1000,9 +1113,7 @@ def start():
             with ctx.as_user(j["user"]):
                 recover(j)
         if j.get("was_live") and j.get("creator"):
-            paused.append((j["user"], j["creator"], j["source"]["url"]))
-            j.pop("was_live", None)
-            jobs.save(j)
+            paused.append((j["user"], j["id"]))      # stays marked until it is picked up or its stream is over
     if paused:
         threading.Thread(target=_resume_recordings, args=(paused,), daemon=True).start()
     threading.Thread(target=watch_loop, daemon=True).start()
