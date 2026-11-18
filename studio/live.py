@@ -42,6 +42,53 @@ def _trim_names(users: dict, second: int, kept: int) -> int:
     return second
 
 
+# A video picture is shown at most a few frames after ffmpeg reads it. A picture said to be shown
+# more than this many seconds after it is read has a time that is plainly wrong.
+WILD_PTS = 5
+
+_setts = None
+
+
+def _can_fix_times() -> bool:
+    """Whether this ffmpeg has the 'setts' step that can correct a picture's time (ffmpeg 4.4 and newer).
+
+    Asked once. An older ffmpeg still records, just without the correction below."""
+    global _setts
+    if _setts is None:
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-bsfs"], capture_output=True, text=True, timeout=20,
+                                 creationflags=media.NO_WINDOW).stdout
+            _setts = bool(re.search(r"(?m)^\s*setts\s*$", out))
+        except Exception:  # noqa: BLE001
+            _setts = False
+    return _setts
+
+
+def ingest_cmd(urls: list, p: str) -> list:
+    """The ffmpeg command that records a stream: 6-second video pieces on disk, and the sound as raw audio.
+
+    Why the pictures' times are corrected: Twitch puts an advert in front of a stream when someone starts
+    watching. When the advert ends, ffmpeg gives the first one or two pictures of the real stream the stream's
+    own time (often thousands of seconds ahead), while every picture after that is moved back onto the advert's
+    time. The piece-cutter takes that first picture's time as the start of the piece and never cuts again
+    until the stream really reaches it, so the whole recording piles into one piece that never finishes: the
+    buffer stops at the length of the advert (about a minute) and no clip can be cut. A picture whose time is
+    far ahead of the moment it is decoded is given that moment's time instead, which is where it really belongs.
+    """
+    cmd = ["ffmpeg", "-v", "error", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10"]
+    for u in urls:
+        cmd += ["-i", u]
+    a_in = "1:a:0" if len(urls) > 1 else "0:a:0"
+    cmd += ["-map", "0:v:0", "-map", a_in, "-c", "copy"]
+    if _can_fix_times():
+        cmd += ["-bsf:v", f"setts=pts=if(gt(PTS-DTS\\,{WILD_PTS}/TB)\\,DTS\\,PTS)"]
+    cmd += ["-f", "segment", "-segment_time", str(SEG_SEC),
+            "-reset_timestamps", "1", "-segment_format", "mpegts", "-segment_list", f"{p}.csv",
+            "-segment_list_type", "csv", f"{p}_%05d.ts",
+            "-map", a_in, "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"]
+    return cmd
+
+
 def media_safe(e) -> str:
     from . import safe
     return safe.friendly(e, 300)
@@ -262,15 +309,7 @@ class Session:
             with self.lock:
                 self.seg_clock = max(self.seg_clock, self.samples / SR)
             p = f"p{self.part:02d}"
-            cmd = ["ffmpeg", "-v", "error", "-reconnect", "1", "-reconnect_streamed", "1",
-                   "-reconnect_delay_max", "10"]
-            for u in info["urls"]:
-                cmd += ["-i", u]
-            a_in = "1:a:0" if len(info["urls"]) > 1 else "0:a:0"
-            cmd += ["-map", "0:v:0", "-map", a_in, "-c", "copy", "-f", "segment", "-segment_time", str(SEG_SEC),
-                    "-reset_timestamps", "1", "-segment_format", "mpegts", "-segment_list", f"{p}.csv",
-                    "-segment_list_type", "csv", f"{p}_%05d.ts",
-                    "-map", a_in, "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"]
+            cmd = ingest_cmd(info["urls"], p)
             with open(self.dir / "ffmpeg.log", "ab") as errlog:
                 self.proc = subprocess.Popen(cmd, cwd=self.buf, stdout=subprocess.PIPE, stderr=errlog,
                                              creationflags=media.NO_WINDOW)
