@@ -74,6 +74,57 @@ first = 7.0
 check("two seconds of silence at the start are cut: the clip starts just before the first word", s, lambda x: first - 0.3 - 0.01 <= x < first)
 check("...and still is at least as long as the shortest allowed", e - s, lambda d: d >= 8)
 
+# ---------------------------------------------------------------- R2: the AI's marks and the video's own signals make the score
+long_talk = talk(["this is a sentence of eight words right here"] * 20)          # about 82 s of talking, no gaps
+base = {"start": 0.0, "end": 60.0, "score": 80}
+check("an answer with only a score keeps that score when nothing else is known", brain.final_score(base), 80)
+check("...and with the words, when the clip is all talking and starts on a sentence", brain.final_score(base, words=long_talk), 80)
+quiet = talk(["this is a sentence of eight words right here"] * 4)              # talking only in the first 17 s
+check("a clip that is mostly silence scores lower", brain.final_score(base, words=quiet), lambda x: x < 70)
+inside = dict(base, payoff_at=40.0)
+outside = dict(base, payoff_at=75.0)
+check("a punchline outside the clip costs points", brain.final_score(outside, words=long_talk) < brain.final_score(inside, words=long_talk))
+loud_clip = np.zeros(90); loud_clip[30:33] = 1.6
+check("a big jump in loudness inside the clip raises the score", brain.final_score(base, loud=loud_clip), lambda x: x > 80)
+check("...and so does a part viewers rewatched", brain.final_score(base, replayed=np.arange(90) < 60), lambda x: x > 80)
+mid = dict(base, start=long_talk[3]["s"] - 0.15)
+check("a clip that starts in the middle of a sentence costs points", brain.final_score(dict(mid, end=mid["start"] + 60), words=long_talk), lambda x: x < 80)
+rub = dict(base, rubric={"hook": 9, "payoff": 9, "standalone": 8, "emotion": 8})
+check("the four marks of the rubric give the AI's part of the score", brain.final_score(rub), 86)
+weak = dict(base, rubric={"hook": 2, "payoff": 3, "standalone": 4, "emotion": 2})
+check("...a weak rubric gives a weak score even if the AI's single number was kind", brain.final_score(weak), lambda x: x < 40)
+br = brain.score_breakdown(rub, words=long_talk)
+check("the breakdown says where the score came from", set(br) >= {"ai", "signals", "penalty", "final"})
+
+got = brain._tidy({"score": 70, "rubric": {"hook": "x", "payoff": 50, "standalone": -3, "emotion": 7.6, "junk": 9},
+                   "hook_at": "soon", "payoff_at": 12.5}, 0, 30)
+check("rubric marks are kept between 0 and 10, junk is dropped", got.get("rubric"), {"payoff": 10, "standalone": 0, "emotion": 8})
+check("a second that is not a number is ignored", (got.get("hook_at"), got.get("payoff_at")), (None, 12.5))
+got = brain._tidy({"score": 70, "rubric": "great", "hook_at": -4, "payoff_at": float("nan")}, 0, 30)
+check("nonsense in place of the rubric is ignored", (got.get("rubric"), got.get("hook_at"), got.get("payoff_at")), (None, None, None))
+props = brain.SCHEMA["items"]["properties"]
+check("the AI is asked for the rubric, the hook second and the payoff second",
+      set(props["rubric"]["properties"]) == {"hook", "payoff", "standalone", "emotion"} and "hook_at" in props and "payoff_at" in props)
+rules = brain._rules("en", min_len=30, max_len=90, transcript="x")
+check("the rules explain the rubric and the TikTok length", all(x in rules for x in ("rubric", "hook_at", "payoff_at", "TikTok", "45-75")))
+check("...and that the first 3 seconds decide", "first 3 seconds" in rules)
+
+# ---------------------------------------------------------------- R5.3: the clip opens near the hook
+story = talk(["one two three four five six seven eight"] * 25)                  # 4.15 s a sentence
+s0 = story[0]["s"]
+hook_at = s0 + 15.0
+s, e = brain._snap({"start": s0, "end": s0 + 40, "hook_at": hook_at}, brain.make_lines(story), story, 30, 90, 200)
+check("a hook 15 s after the start moves the start closer to it", s, lambda x: 9.0 <= x <= hook_at - 2)
+check("...and the clip is still between the shortest and longest allowed", e - s, lambda d: 30 - 0.5 <= d <= 90)
+s2, _ = brain._snap({"start": s0, "end": s0 + 40, "hook_at": s0 + 6}, brain.make_lines(story), story, 30, 90, 200)
+check("a hook in the first 8 seconds leaves the start alone", s2, lambda x: x <= s0)
+s3, e3 = brain._snap({"start": s0 + 50, "end": s0 + 90, "hook_at": s0 + 75}, brain.make_lines(story), story, 30, 90, 100)
+check("near the end of the stretch the start only moves as far as the shortest clip still fits", (s3, e3 - s3), lambda p: p[0] > 55 and p[1] >= 29.5)
+# R5.4: the clip ends after the punchline
+s, e = brain._snap({"start": s0, "end": s0 + 32, "payoff_at": s0 + 45}, brain.make_lines(story), story, 30, 90, 200)
+check("the clip runs on to at least 1.5 s after the punchline", e, lambda x: x >= s0 + 46.5)
+check("...ending where a sentence ends", any(abs(e - x) < 0.4 for x in brain.sentence_ends(story)))
+
 # ---------------------------------------------------------------- R11a: a live "clip it" is never inside the clip
 story = ["okay so we are going in now", "watch the left side for me", "there is one guy on the roof", "I am going to jump him",
          "here we go here we go", "oh my god he is down", "and the second one too", "and the third one is dead"]
@@ -114,7 +165,7 @@ def session(**over):
     return s
 
 # R11a, as a live check: someone said "clip"
-s = session(min_gap_min=0)
+s = session(min_gap_min=0, min_len=15)
 s._triggers([x for x in w if x["s"] >= said - 0.01])
 check('saying "clip" marks the moment for the AI', s.said and abs(s.said["t"] - said) < 0.01)
 s._ai_check((said - 60, said + 15), 'Someone said "clip"', said=s.said["t"])
@@ -179,6 +230,32 @@ else:
     af = enc and enc[-1][enc[-1].index("-af") + 1]
     check("the sound is measured first, then evened out with what was measured", af, lambda a: bool(a) and "measured_I=" in a and "linear=true" in a)
     check("...and the clip is made", (work / "out" / "c1.mp4").exists())
+    cover = [c for c in seen if "-frames:v" in c]
+    check("without a better second, the cover is taken 1.2 s in, as before", cover and cover[-1][cover[-1].index("-ss") + 1], "1.20")
+    seen.clear()
+    render.subprocess.run = spy
+    try:
+        render.render_clip(src, work / "out", "c2", {"start": 0.5, "end": 4.5, "hook": "", "layout": "crop"}, [], 640, 360,
+                           cover_at=2.5)
+    finally:
+        render.subprocess.run = real_run
+    cover = [c for c in seen if "-frames:v" in c]
+    check("the cover is taken at the punchline: -ss is the punchline minus the clip's start",
+          cover and cover[-1][cover[-1].index("-ss") + 1], "2.50")
+    # the clip's punchline second reaches the cover, counted from the clip's start
+    asked = {}
+    real_rc = render.render_clip
+    render.render_clip = lambda *a, **k: asked.update(k) or {"file": "x.mp4", "cover": "x.jpg"}
+    try:
+        jd = work / "job"; (jd / "clips").mkdir(parents=True)
+        (jd / "s.mp4").write_bytes(b"x")
+        cj = {"id": "clip01", "start": 100.0, "end": 140.0, "payoff_at": 121.0, "cover_at": 121.0, "layout": "blur",
+              "captions": False, "title": "t", "description": "", "hashtags": [], "hook": "", "score": 80}
+        jobs.render_one({"id": "job-cover001", "dir": str(jd), "creator": None, "user": None, "duration": 300,
+                         "source_path": str(jd / "s.mp4"), "width": 640, "height": 360, "clips": [cj]}, cj, [])
+    finally:
+        render.render_clip = real_rc
+    check("a clip's cover second is passed to the video maker from the clip's start", asked.get("cover_at"), 21.0)
     check("if the sound cannot be measured, it is evened out in one pass as before",
           render._loudnorm(work / "missing.mp4", 0, 4), "loudnorm=I=-14:TP=-1.5:LRA=11")
     shutil.rmtree(work, ignore_errors=True)

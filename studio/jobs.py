@@ -107,13 +107,35 @@ _by_user: dict = {}                       # user -> {job id: job}: listing one p
 _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
-DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
+DEFAULTS = {"max_clips": 6, "min_len": 30, "max_len": 90, "style": "bounce", "layout": "blur", "quality": 720,
             "range_start": None, "range_end": None, "captions": True,
             "cam_side": render.CAM_SIDE, "cam_top": render.CAM_TOP}   # where the webcam goes in the gameplay layout
 
 
 LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080),
           "cam_top": render.CAM_TOP_RANGE}
+SHARP_LAYOUTS = ("crop", "gameplay")   # these fill the phone screen with a small part of the picture
+
+
+def fetch_height(options) -> int:
+    """How tall a picture a video is downloaded at.
+
+    "crop" and "gameplay" blow a small part of the picture up to fill the phone screen, so they always get
+    1080p when the video has it, whatever the quality setting says. "blur" and "zoom" use the quality setting."""
+    q = int(options.get("quality") or DEFAULTS["quality"])
+    return max(q, config.MAX_SOURCE_HEIGHT) if options.get("layout") in SHARP_LAYOUTS else q
+
+
+def _source_size(job, src) -> tuple:
+    """The real width and height of the file a clip is cut from.
+
+    It can differ from the size saved for the whole video: a live recording that carries on after a restart
+    may now be sharper (1080p instead of 720p). The saved size is used when the file cannot be read."""
+    try:
+        meta = media.probe(src)
+        return meta["width"], meta["height"]
+    except Exception:  # noqa: BLE001
+        return job["width"], job["height"]
 
 
 def clean_options(options) -> dict:
@@ -552,7 +574,10 @@ def render_one(job, clip, words):
                 creators.log(job["creator"], "No webcam found in this clip, so the whole game is shown with a blurred fill instead.")
         local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []
-        out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
+        # The cover is the punchline (or the loudest second), counted from the clip's start; else the default.
+        cover = clip.get("cover_at")
+        when = {"cover_at": round(cover - clip["start"], 2)} if cover is not None and clip["start"] < cover < clip["end"] else {}
+        out = render.render_clip(src, d / "clips", clip["id"], local, near, *_source_size(job, src), **when)
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
         post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
         disk.write_text(d / "clips" / f"{clip['id']}.json", json.dumps(post, indent=1))
@@ -647,8 +672,9 @@ def _piece_again(job, clip):
     want = max(0.0, clip["start"] - PAD)
     until = clip["end"] + PAD if not job.get("duration") else min(job["duration"], clip["end"] + PAD)
     try:
-        piece = media.download_section(src["url"], d / "clips", f"{clip['id']}.src", want, until,
-                                       int(job["options"]["quality"]), exact=True)
+        # The same height as the video's other parts when they are known, so every part is the same size
+        height = job.get("height") or fetch_height(job["options"])
+        piece = media.download_section(src["url"], d / "clips", f"{clip['id']}.src", want, until, height, exact=True)
         meta = media.probe(piece)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Could not fetch this part of the video: {safe.friendly(e, 250)}") from e
@@ -665,7 +691,7 @@ def _fetch_piece(job, clip, full_audio):
     try:
         want = max(0.0, clip["start"] - PAD)
         piece = media.download_section(job["source"]["url"], d / "clips", f"{clip['id']}.src", want,
-                                       min(job["duration"], clip["end"] + PAD), int(o["quality"]))
+                                       min(job["duration"], clip["end"] + PAD), fetch_height(o))
         wav = d / "clips" / f"{clip['id']}.wav"
         media.extract_audio(piece, wav)
         part = media.load_audio(wav)
@@ -685,6 +711,49 @@ PROGRESSIVE_FROM = 20 * 60
 CONTEXT = 90            # each part is read with the minute and a half before it, so a moment across the edge is whole
 CANDIDATES_PER_BLOCK = 4   # moments kept from each part of a long video; the best of all of them become the clips
 INSTANT_SCORE = 85      # a moment this strong is made straight away (up to half the clips), not at the end
+VIDEO_MIN_SCORE = 60    # a video without a creator: moments scoring less are never made into clips
+TIMES = ("start", "end", "hook_at", "payoff_at", "cover_at")    # the seconds a moment carries, all on the same clock
+
+
+def _min_score(job) -> int:
+    """The score a moment needs to become a clip: the creator's minimum (Setup), or VIDEO_MIN_SCORE."""
+    if job.get("creator"):
+        try:
+            return int((creators.get(job["creator"]) or {}).get("min_score", VIDEO_MIN_SCORE))
+        except Exception:  # noqa: BLE001
+            pass
+    return VIDEO_MIN_SCORE
+
+
+def _fewer_note(job, made: int) -> str:
+    """Why a video has fewer clips than asked for, when weaker moments were left out on purpose."""
+    more = f" for more than {made} clip{'s' if made != 1 else ''}" if made else ""
+    if job.get("creator"):
+        return f"No moment was strong enough{more}; lower the minimum score in Setup to get more."
+    return f"No moment was strong enough{more}, so weaker moments were left out rather than made into weak clips."
+
+
+def _retell(job, clip, words, lang_hint, game):
+    """A clip whose start or end moved more than a few seconds from what the AI saw gets its hook, title and post
+    text written again from its exact words, so they match the clip. Once per clip; on any trouble it keeps its text."""
+    if clip.get("retold") or _num(clip.get("moved")) <= brain.MOVED_SEC:
+        return
+    clip["retold"] = True
+    said = [w for w in words if clip["start"] - 0.2 <= w["s"] < clip["end"]]
+    text = " ".join(str(w["w"]) for w in said)
+    usage.set_context(job.get("creator"), job.get("title") or "")
+    new = brain.retell(text, job.get("title") or "", job.get("uploader") or "", game=game,
+                       lang=brain.resolve_lang(lang_hint, said))
+    if new:
+        clip.update(new)
+
+
+def _num(v) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
 
 
 def _is_static(c, ranges) -> bool:
@@ -792,7 +861,7 @@ def _run_job(job):
         span = (o["range_end"] or meta["duration"]) - (o["range_start"] or 0)
         pieces = span > LONG_VIDEO or meta["duration"] <= 0
         if not pieces:  # shorter video: fetch all of it in the background while the audio is worked on
-            video = fetch.submit(media.download, src["url"], d, int(o["quality"]))
+            video = fetch.submit(media.download, src["url"], d, fetch_height(o))
         audio_file = media.download_audio(src["url"], d, lambda p: _set(job, progress=0.03 + 0.1 * p))
     else:
         pieces, audio_file = False, Path(src["path"])
@@ -827,7 +896,7 @@ def _run_job(job):
                 except Exception as e:  # noqa: BLE001 - sites sometimes refuse a download
                     notes.append(f"Video download refused once ({str(e)[-80:]}), retrying")
                     try:
-                        path = media.download(src["url"], d, int(o["quality"]))
+                        path = media.download(src["url"], d, fetch_height(o))
                     except Exception as e2:  # noqa: BLE001
                         notes.append(f"Whole-video download failed ({str(e2)[-80:]}), fetching clip parts instead")
                 if path:
@@ -855,6 +924,11 @@ def _run_job(job):
             if len(tw) >= 3:
                 exact[clip["id"]] = (a0 / 16000, b0 / 16000, tw)
                 words_now = tw
+        if clip["status"] != "error" and model_used():
+            try:
+                _retell(job, clip, words_now, want_lang if want_lang in ("en", "es") else job.get("lang"), game)
+            except Exception:  # noqa: BLE001 - the clip keeps the text the AI first wrote
+                traceback.print_exc()
         if clip["status"] != "error":
             render_one(job, clip, words_now)
 
@@ -864,6 +938,7 @@ def _run_job(job):
     step = BLOCK * 16000 if span > PROGRESSIVE_FROM else hi - lo
     blocks = [(x, min(hi, x + step)) for x in range(lo, hi, step)] or [(lo, hi)]
     words, tokens, model = [], 0, None
+    model_used = lambda: bool(model)          # noqa: E731 - the AI answered at least once for this video
     done_blocks = 0
     yt = None
     if src["type"] == "url" and config.YT_TRANSCRIPT and media.is_youtube(src["url"]):
@@ -923,6 +998,8 @@ def _run_job(job):
         return static_state["ranges"]
 
     max_clips = int(o["max_clips"])
+    need = _min_score(job)        # fewer clips rather than weak ones: moments under this are never made
+    weak = 0
     many = len(blocks) > 1
     # A long video: a few moments are kept from every part, and the best of the whole video become the clips.
     # A short one is read in one go and keeps as many as it may need.
@@ -991,13 +1068,13 @@ def _run_job(job):
         if ai.get("note"):
             notes.append(ai["note"])
         for c in found:
-            c.update(start=round(c["start"] + c0, 2), end=round(c["end"] + c0, 2), block=bi)
+            c.update({k: round(c[k] + c0, 2) for k in TIMES if c.get(k) is not None}, block=bi)
         with _lock:
             job["candidates"] = job.get("candidates", []) + found
         # A very strong moment is made straight away, so the first clips do not wait for the whole video.
         made_early = sum(1 for c in job["clips"] if c.get("pick") == "instant")
         for c in sorted(found, key=lambda c: -c["score"]):
-            if c["score"] < INSTANT_SCORE or made_early >= early or len(job["clips"]) >= max_clips:
+            if c["score"] < max(INSTANT_SCORE, need) or made_early >= early or len(job["clips"]) >= max_clips:
                 break
             if brain._overlaps(c["start"], c["end"], job["clips"]) or _is_static(c, statics(False)):
                 continue
@@ -1011,6 +1088,10 @@ def _run_job(job):
     if left > 0 and job.get("candidates"):
         _set(job, stage="Choosing the best moments of the whole video" if many else "Choosing the best moments")
         pool, _ = _drop_static(job["candidates"], statics(True), notes)
+        if model:          # with no AI the loudest moments are all there is: they are not held to the minimum
+            strong = [c for c in pool if c["score"] >= need]
+            weak = len(pool) - len(strong)
+            pool = strong
         for c in sorted(brain.pick_final(pool, left, taken=job["clips"]), key=lambda c: c["start"]):
             add_clip(c, "final")
         save(job)
@@ -1027,8 +1108,10 @@ def _run_job(job):
     fetch.shutdown(wait=False)
     del audio
     clips = job["clips"]
-    job["ai"] = {"model": model, "tokens": tokens, "log": notes[-5:],
-                 "note": "The AI was unavailable, so clips were picked by loudness only." if clips and not model else ""}
+    note = "The AI was unavailable, so clips were picked by loudness only." if clips and not model else ""
+    if model and weak and len(clips) < max_clips:
+        note = _fewer_note(job, len(clips))
+    job["ai"] = {"model": model, "tokens": tokens, "log": notes[-5:], "note": note}
     stage = "Done" if clips else "Done, but nothing clip-worthy was found"
     _set(job, status="done", stage=stage, progress=1.0, took=round(time.time() - t0))
     try:

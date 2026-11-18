@@ -114,8 +114,12 @@ class _Quiet:
 def resolve(url: str) -> dict:
     """Ask yt-dlp for the stream's playable address. Raises NotLive if the channel is offline."""
     import yt_dlp
+    # The sharpest picture up to config.LIVE_HEIGHT (1080p unless set): on Twitch and Kick that is the
+    # "1080p60" picture, or the stream's own "source" one when it is that size. A stream that does not go that
+    # high gets its best below it; one whose sizes are not given gets its best picture.
+    h = config.LIVE_HEIGHT
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "logger": _Quiet(),
-            "format": "b[height<=720]/bv*[height<=720]+ba/b"}
+            "format": f"b[height<={h}]/bv*[height<={h}]+ba/b"}
     if media.is_youtube(url) and media.youtube_paused():
         raise NotLive(media.YT_BLOCKED)
     try:
@@ -589,6 +593,11 @@ class Session:
             sig, tok2 = brain.judge_signals(z[lo:hi], chat, lo, now, unit=unit, timeout=config.LIVE_AI_TIMEOUT)
             self.checks += 1
             self.tokens += tok2
+            print("[DEBUG REACTION]")
+            print("Chat available:", chat is not None)
+            print("Chat messages:", sum(chat) if chat else 0)
+            print("Audio samples:", len(z[lo:hi]))
+            print("Detected signals:", sig)
         except Exception as e:  # noqa: BLE001
             sig = []
             self.job["ai"]["last_error"] = str(e)[-200:]

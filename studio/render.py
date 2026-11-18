@@ -389,8 +389,9 @@ _qsv_ok = None
 RENDER_SECONDS = 600      # one clip's video encode; far beyond normal, so a frozen encoder is stopped, not waited on
 
 
-def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int) -> dict:
-    """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names."""
+def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int, cover_at=None) -> dict:
+    """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names.
+    cover_at is the second of the clip (from its start) the cover picture is taken at: the punchline, when known."""
     out_dir.mkdir(parents=True, exist_ok=True)
     start, end = clip["start"], clip["end"]
     layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, clip.get("layout", "blur"))
@@ -412,14 +413,14 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
     work = Path(tempfile.mkdtemp(prefix="pk"))
     try:
         out = _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, src_size=(src_w, src_h),
-                         place=place)
+                         place=place, cover_at=cover_at)
         out["note"] = note     # also clears an old note once the webcam is found
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None, src_size=None, place=(None, None)) -> dict:
+def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None, src_size=None, place=(None, None), cover_at=None) -> dict:
     global _qsv_ok
     (work / f"{name}.ass").write_text(ass, encoding="utf-8")
     (work / "f").mkdir()
@@ -447,6 +448,8 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
     else:
         raise RuntimeError(f"Render failed: {err}")
     cover_t = min(1.2, (end - start) / 2)
+    if cover_at is not None and 0 <= cover_at < end - start - 0.1:
+        cover_t = cover_at
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
          "-q:v", "3", f"{name}.jpg"], cwd=work)
     for ext in ("mp4", "jpg", "ass"):

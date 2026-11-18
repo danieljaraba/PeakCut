@@ -251,3 +251,18 @@ def _read_google_client() -> tuple:
 # ---------------------------------------------------------------- video
 MAX_SOURCE_HEIGHT = 1080
 OUT_W, OUT_H, OUT_FPS = 1080, 1920, 30
+
+
+def _live_height() -> int:
+    """How sharp a live stream is recorded: the tallest picture asked for, 360 to 1080 (default 1080).
+
+    The stream is saved as it arrives, without re-encoding, so a sharper picture costs no processor time,
+    only disk: about twice as much as 720p for the minutes kept in the buffer."""
+    try:
+        v = int(env("PEAKCUT_LIVE_HEIGHT") or MAX_SOURCE_HEIGHT)
+    except ValueError:
+        v = MAX_SOURCE_HEIGHT
+    return max(360, min(MAX_SOURCE_HEIGHT, v))
+
+
+LIVE_HEIGHT = _live_height()

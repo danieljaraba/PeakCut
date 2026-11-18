@@ -34,7 +34,7 @@ class Video:
             t += 0.5
         return out
 
-state = {"video": None, "asks": [], "renders": [], "stop_at": None}
+state = {"video": None, "asks": [], "renders": [], "stop_at": None, "retold": []}
 
 def fake_transcribe(part, progress=None):
     v = state["video"]
@@ -56,8 +56,20 @@ def clip(start, end, score, cat="funny", hook="H"):
     return {"start": start, "end": end, "score": score, "category": cat, "hook": hook, "title": "t",
             "description": "d", "hashtags": ["a"], "reason": "r"}
 
+def whole(prompt, word, sentences=8, score=80, cat="funny"):
+    """A moment from the line with `word` to the end of a sentence about `sentences` lines later: nothing to move."""
+    ls = lines_of(prompt)
+    i = next((k for k, (s, t) in enumerate(ls) if word in t), None)
+    if i is None or i + sentences >= len(ls):
+        return []
+    return [clip(ls[i][0], round(ls[i + sentences][0] - 0.1, 2), score, cat)]
+
 answer = lambda prompt: []
 def fake_ai(prompt, schema=None, purpose="", timeout=None):
+    if purpose == brain.RETELL_PURPOSE:          # the hook and title written again for a clip whose edges moved
+        state["retold"].append(prompt)
+        return [{"hook": "NEW HOOK", "title": "Written for the final cut", "description": "d", "hashtags": ["x"],
+                 "highlight_words": ["word"]}], "test-model", 50
     state["asks"].append(prompt)
     return answer(prompt), "test-model", 100
 
@@ -77,7 +89,7 @@ jobs.render_one = fake_render
 
 n_job = [0]
 def run(video, max_clips, resume_job=None, **opt):
-    state.update(video=video, asks=[], renders=[])
+    state.update(video=video, asks=[], renders=[], retold=[])
     if resume_job:
         job = resume_job
     else:
@@ -166,6 +178,57 @@ asks_before = len(state["asks"])
 job = run(v, 2, resume_job=job)
 check("only the parts not read yet are sent to the AI again", len(state["asks"]), 3)
 check("the best moments of the whole video still win", sorted(round(c["start"] / 100) for c in job["clips"]), [3, 15])
+
+# ---------------------------------------------------------------- fewer but good: weak moments never fill the places
+names = {200: "GOODA", 900: "WEAKA", 1300: "GOODB", 1700: "WEAKB", 2100: "WEAKC", 2500: "GOODC", 2900: "WEAKD", 3300: "WEAKE"}
+v = Video(60, {s: w for s, w in names.items()})
+scores = {"GOODA": 90, "GOODB": 82, "GOODC": 75, "WEAKA": 50, "WEAKB": 45, "WEAKC": 40, "WEAKD": 55, "WEAKE": 30}
+answer = lambda p: [c for w, sc in scores.items() for c in whole(p, w, score=sc)]
+job = run(v, 6)
+check("only the three moments above the minimum become clips", sorted(round(c["start"] / 100) for c in job["clips"]), [2, 13, 25])
+check("...and the page says why there are fewer", (job.get("ai") or {}).get("note", ""), lambda n: n.startswith("No moment was strong enough"))
+check("...and the note reaches the page", jobs.public(job)["ai"]["note"], lambda n: n.startswith("No moment was strong enough"))
+check("every clip keeps the breakdown of its score", all(isinstance(c.get("scores"), dict) for c in job["clips"]))
+answer = lambda p: [c for w, sc in scores.items() for c in whole(p, w, score=sc) if sc >= 75]
+job = run(v, 3)
+check("when enough moments are strong, there is no such note", (len(job["clips"]), (job.get("ai") or {}).get("note", "")), (3, ""))
+check("the score that decides is the final one: the AI's number is in the breakdown", all(c["scores"]["ai"] in (90, 82, 75) for c in job["clips"]))
+
+# ---------------------------------------------------------------- R10: the hook and title are written again after a big move
+v = Video(8, {60: "STILL", 240: "MOVED"})
+def moving(p):
+    out = whole(p, "STILL", score=80)
+    s = at(p, "MOVED")
+    if s is not None:
+        out.append(clip(s, s + 22, 80))                    # 22 s: shorter than the shortest clip (30 s), so the end moves
+    return out
+answer = moving
+job = run(v, 3)
+by = {round(c["start"] / 60): c for c in job["clips"]}
+check("(two clips are made)", sorted(by), [1, 4])
+check("only the clip whose edges moved more than 3 s is described again", len(state["retold"]), 1)
+check("...with the words of the final cut", "MOVED" in (state["retold"] or [""])[0])
+check("...and gets the new hook and title", (by.get(4, {}).get("hook"), by.get(4, {}).get("title")), ("NEW HOOK", "Written for the final cut"))
+check("the clip that hardly moved keeps what the AI first wrote", by.get(1, {}).get("hook"), "H")
+check("the rewrite is in English for an English video", brain.WRITE_EN in (state["retold"] or [""])[0])
+
+class SpanishVideo(Video):
+    def words(self, a, b):
+        es = "vamos hermano que locura esto no puede ser jajaja pero que es eso".split()
+        out = super().words(a, b)
+        for i, w in enumerate(out):
+            if w["w"].rstrip(".") == "word":
+                w["w"] = es[i % len(es)] + ("." if w["w"].endswith(".") else "")
+        return out
+v = SpanishVideo(8, {240: "MOVED"})
+answer = lambda p: [clip(at(p, "MOVED"), at(p, "MOVED") + 22, 80)] if at(p, "MOVED") is not None else []
+job = run(v, 3)
+check("a Spanish video's rewrite asks for Spanish", len(state["retold"]) == 1 and "natural, spoken Spanish" in state["retold"][0])
+
+# ---------------------------------------------------------------- A5: TikTok length by default
+from studio import creators
+check("new videos default to 30 to 90 seconds", (jobs.DEFAULTS["min_len"], jobs.DEFAULTS["max_len"]), (30, 90))
+check("new creators default to 30 to 90 seconds", (creators.DEFAULTS["min_len"], creators.DEFAULTS["max_len"]), (30, 90))
 
 # ---------------------------------------------------------------- choosing: overlaps, variety, never more than asked
 C = lambda s, sc, cat="funny": {"start": s, "end": s + 30, "score": sc, "category": cat}

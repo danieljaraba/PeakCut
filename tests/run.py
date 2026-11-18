@@ -68,6 +68,7 @@ def main() -> int:
                 ("finding the facecam in a gaming stream", ["tests/test_facecam.py"]),
                 ("switching a finished clip to the gameplay layout finds the webcam", ["tests/test_layout_cam.py"]),
                 ("the gameplay layout, checked on the finished video", ["tests/test_gameplay.py"]),
+                ("1080p: live recording, downloads by layout, a 1920x1080 stream", ["tests/test_hd.py"]),
                 ("saved files survive the computer switching off", ["tests/test_disk.py"]),
                 ("a restart keeps one entry per recording, and damaged notes are rebuilt", ["tests/test_restart.py"]),
                 ("fresh installs: ffmpeg, the speech model, AI errors", ["tests/test_tools.py"]),
