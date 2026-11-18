@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -53,6 +54,23 @@ BOOT = f"{int(time.time()) % 100000:x}"     # part of every sync token, so pages
 async def _more_threads():
     import anyio.to_thread
     anyio.to_thread.current_default_thread_limiter().total_tokens = int(config.env("PEAKCUT_REQUEST_THREADS", "64"))
+    if sys.platform == "win32":
+        import asyncio
+        loop = asyncio.get_running_loop()
+        before = loop.get_exception_handler()
+
+        def _quiet_resets(lp, context):
+            # On Windows, when a browser drops a connection (a tab closed, a video skipped, a refresh) Python still
+            # tries to close it politely and prints a long "ConnectionResetError: WinError 10054". Nothing is wrong
+            # and nothing is lost, so that one message is not printed. Every other problem is shown as before.
+            if isinstance(context.get("exception"), ConnectionResetError):
+                return
+            if before:
+                before(lp, context)
+            else:
+                lp.default_exception_handler(context)
+
+        loop.set_exception_handler(_quiet_resets)
 
 
 @app.on_event("startup")
