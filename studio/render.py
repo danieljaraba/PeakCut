@@ -81,7 +81,7 @@ def install_fonts():
 
 
 LAYOUTS = {"blur": "Full frame + blurred fill", "zoom": "Zoomed in + blurred fill", "crop": "Fill the screen (centre crop)",
-           "gameplay": "Gameplay fills the screen, facecam in the corner"}
+           "gameplay": "Streamer on top, game below"}
 
 
 def _ts(t):
@@ -240,45 +240,137 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return head + "\n".join(ev) + "\n"
 
 
-PIP_W = 380            # how wide the webcam picture is in the 1080-wide frame
-PIP_MAX_H = 520        # and the tallest it may be: a webcam turned upright would otherwise cover a third of the screen
-PIP_MARGIN = 26        # its distance from the side of the frame
-CAM_SIDE = "right"     # which side of the clip the webcam picture sits on, unless the creator or clip says otherwise
-CAM_TOP = 20           # how far down its top edge sits, as a percent of the height (20 % of 1920 is 384 pixels):
-                       # low enough to be seen with the face in it, not hidden up in the corner
-CAM_TOP_RANGE = (3, 60)  # the highest and lowest it may be set to
+SPLIT_H = 576          # the top part of the gameplay layout: the streamer's webcam, the whole width (30 % of 1920)
+GAME_H = H - SPLIT_H   # the bottom part: the game (1344 pixels)
+FACE_KEEP = 0.25       # a webcam taller than the top part is cut mostly from its bottom: the face is in its upper part
+LINE_W = 6             # the line between the webcam and the game
+BADGE_H = 84           # the channel's black pill, centred on that line
+BADGE_BOX = 100        # the picture with the line and the pill, laid over the clip with the line in its middle
+BADGE_MAX = 32         # the longest channel text, in letters
+PLATFORM_COLOURS = {"kick": "#53FC18", "twitch": "#9146FF", "youtube": "#FF0033"}
 CAP_HALF = 130         # half the height of a line of captions, with room for the word that pops up bigger
-CAP_GAP = 40           # the space kept between the webcam picture and the captions
 CAP_LOW = 1640         # the lowest the captions go: below this the phone apps put their own text
 SAFE_TOP = 120         # the strip at the very top that the phone apps cover with their own buttons
-HOOK_GAP = 24          # the space between the webcam picture and the heading
+HOOK_GAP = 22          # the space between the channel's pill and the heading under it
 NO_WEBCAM = "No webcam was found in this stream, so the whole game is shown with a blurred fill instead."
 
 
-def cam_place(side=None, top=None):
-    """The webcam position asked for, made safe: a side ("right" or "left") and a whole percent inside the range."""
-    side = side if side in ("left", "right") else CAM_SIDE
-    try:
-        top = int(round(float(top)))
-    except (TypeError, ValueError):
-        top = CAM_TOP
-    return side, max(CAM_TOP_RANGE[0], min(CAM_TOP_RANGE[1], top))
+def badge_colour(platform) -> str:
+    """The colour of the line and the channel's name: the platform's own, white for anything else."""
+    return PLATFORM_COLOURS.get(platform or "", "#FFFFFF")
 
 
-def gameplay_plan(src_w, src_h, facecam, side=None, top=None):
-    """Where everything goes in the gameplay layout, or None when the webcam box cannot be used.
+def clean_label(text) -> str:
+    """The channel text a person typed, made safe to keep: one line, no control characters, not too long."""
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))).strip()[:BADGE_MAX].strip()
 
-    "cam" is the webcam box in the stream, trimmed to the stream's edges.
-    "game" is the upright slice of the stream that fills the phone screen behind it (x, y, width, height).
-    "pip" is where the webcam picture sits in the 1080x1920 clip (x, y, width, height): against the chosen side,
-    with its top edge `top` percent of the way down. A tall picture set very low is lifted just enough to leave
-    room for the captions under it.
 
-    Which slice of the game is shown: a phone screen is much narrower than a stream, so only about a third
-    of its width fits. The middle is used, as that is where games put the action. When the webcam is inside
-    that middle part, it would be seen twice (once in the corner, once behind it), so the slice moves just far
-    enough to one side to leave the webcam out, to whichever side keeps it closest to the middle. When the
-    webcam is too wide to leave out on either side, the slice that shows the least of it is used."""
+def _badge_clean(text) -> str:
+    """Text for the channel's pill: as above, in capitals."""
+    return clean_label(text).upper()
+
+
+def _handle(v) -> str:
+    return re.sub(r"[^\w.\-]", "", str(v or ""))
+
+
+def channel_badge(url="", label="", show=True, name="") -> tuple:
+    """The channel's name as it is written on the video, and its platform ("kick", "twitch", "youtube" or "").
+
+    Written by the user (`label`): used as it is, in capitals. Otherwise made from the channel's link:
+    kick.com/name, twitch.tv/name, youtube.com/@handle. A link that does not name the channel (a past broadcast,
+    a YouTube video or a /channel/ link) uses `name`, the uploader's or creator's name. Nothing for other sites."""
+    from urllib.parse import urlparse
+    from .creators import platform_key
+    url = str(url or "").strip()
+    platform = platform_key(url) if url else ""
+    if not show:
+        return "", platform
+    if _badge_clean(label):
+        return _badge_clean(label), platform
+    parts = [p for p in urlparse(url if "://" in url else "https://" + url).path.split("/") if p] if url else []
+    if platform in ("kick", "twitch"):
+        site = "KICK.COM" if platform == "kick" else "TWITCH.TV"
+        not_names = ("video", "videos", "categories", "directory", "p", "clip", "clips")
+        who = _handle(parts[0] if parts and parts[0].lower() not in not_names else name)
+        return _badge_clean(f"{site}/{who}" if who else site), platform
+    if platform == "youtube":
+        at = next((p[1:] for p in parts if p.startswith("@")), "")
+        if not at and len(parts) > 1 and parts[0] in ("c", "user"):
+            at = parts[1]
+        at = _handle(at or name)
+        return _badge_clean(f"YOUTUBE.COM/@{at}" if at else "YOUTUBE.COM"), platform
+    return "", platform
+
+
+def channel_badge_text(url="", label="", show=True, name="") -> str:
+    return channel_badge(url, label, show, name)[0]
+
+
+def _logo(draw, platform, x, y, s, colour):
+    """The platform's logo, drawn with simple shapes, `s` pixels tall, its top-left corner at x, y."""
+    if platform == "kick":       # the blocky K
+        u = s / 5
+        for r, cs in enumerate(((0, 1, 3, 4), (0, 1, 2, 3), (0, 1, 2), (0, 1, 2, 3), (0, 1, 3, 4))):
+            for c in cs:
+                draw.rectangle([x + c * u, y + r * u, x + (c + 1) * u - 1, y + (r + 1) * u - 1], fill=colour)
+    elif platform == "twitch":   # the speech bubble with two eyes
+        w = s * 0.86
+        pts = [(0.12, 0), (1, 0), (1, 0.6), (0.76, 0.84), (0.56, 0.84), (0.36, 1.0), (0.36, 0.84), (0.1, 0.84), (0.1, 0.18)]
+        draw.polygon([(x + px * w, y + py * s) for px, py in pts], fill=colour)
+        for ex in (0.44, 0.7):
+            draw.rectangle([x + ex * w, y + 0.2 * s, x + (ex + 0.1) * w, y + 0.5 * s], fill="#000000")
+    elif platform == "youtube":  # the play button
+        w, h = s * 1.4, s * 0.98
+        draw.rounded_rectangle([x, y, x + w, y + h], radius=h * 0.28, fill=colour)
+        draw.polygon([(x + w * 0.4, y + h * 0.28), (x + w * 0.4, y + h * 0.72), (x + w * 0.68, y + h * 0.5)], fill="#FFFFFF")
+
+
+LOGO_W = {"kick": 1.0, "twitch": 0.86, "youtube": 1.4}   # each logo's width, for its height
+
+
+def make_badge(path, text, platform):
+    """The picture laid over the clip at the edge between webcam and game: a line right across in the platform's
+    colour and, when there is a text, the channel's name in a black pill in the middle of it, with the logo."""
+    from PIL import Image, ImageDraw, ImageFont
+    colour = badge_colour(platform)
+    img = Image.new("RGBA", (W, BADGE_BOX), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    mid = BADGE_BOX // 2
+    d.rectangle([0, mid - LINE_W // 2, W - 1, mid - LINE_W // 2 + LINE_W - 1], fill=colour)
+    if text:
+        font_path = Path(__file__).resolve().parent / "fonts" / FONT_FILES["Poppins ExtraBold"]
+        size, logo_h, pad, gap = 50, 44, 30, 14
+        while True:                         # a long name gets smaller letters, never wider than the screen
+            font = ImageFont.truetype(str(font_path), size)
+            lw = logo_h * LOGO_W.get(platform, 0)
+            bw = pad * 2 + font.getlength(text) + (lw + gap if lw else 0)
+            if bw <= W - 60 or size <= 24:
+                break
+            size, logo_h = size - 2, max(24, logo_h - 2)
+        x0, y0 = (W - bw) / 2, mid - BADGE_H / 2
+        d.rounded_rectangle([x0, y0, x0 + bw, y0 + BADGE_H], radius=BADGE_H / 2, fill="#000000", outline=colour, width=3)
+        x = x0 + pad
+        if lw:
+            _logo(d, platform, x, mid - logo_h / 2, logo_h, colour)
+            x += lw + gap
+        d.text((x, mid), text, font=font, fill=colour, anchor="lm")
+    img.save(path)
+
+
+def gameplay_plan(src_w, src_h, facecam):
+    """Where everything comes from in the gameplay layout, or None when the webcam box cannot be used.
+
+    "box" is the webcam box in the stream, trimmed to the stream's edges.
+    "cam" is the part of the webcam that fills the top of the clip (x, y, width, height), in the shape of that
+    top part (1080x576). A webcam taller than that keeps its whole width and its upper part, where the face
+    is; a wider one keeps its whole height and its middle.
+    "game" is the upright slice of the stream that fills the bottom of the clip (x, y, width, height).
+
+    Which slice of the game is shown: the middle, as that is where games put the action. When the webcam is
+    inside that middle part it would be seen twice (on top, and again in the game), so the slice moves just far
+    enough to one side to leave it out, to whichever side keeps it closest to the middle. When the webcam is
+    too wide to leave out on either side, the slice that shows the least of it is used."""
     if not facecam or len(facecam) != 4 or not src_w or not src_h:
         return None
     fx, fy, fw, fh = (int(round(float(v))) for v in facecam)
@@ -286,36 +378,36 @@ def gameplay_plan(src_w, src_h, facecam, side=None, top=None):
     fw, fh = min(fw, src_w - fx), min(fh, src_h - fy)
     if fw <= 8 or fh <= 8:
         return None
-    gw = min(src_w, int(src_h * W / H) // 2 * 2)
+    if fw / fh < W / SPLIT_H:                 # taller than the top part: the whole width, the upper part
+        ch = max(2, int(round(fw * SPLIT_H / W)))
+        cam = (fx, fy + int(round((fh - ch) * FACE_KEEP)), fw, ch)
+    else:                                      # wider: the whole height, the middle
+        cw = max(2, int(round(fh * W / SPLIT_H)))
+        cam = (fx + (fw - cw) // 2, fy, cw, fh)
+    gw = min(src_w, int(src_h * W / GAME_H) // 2 * 2)
     middle = (src_w - gw) // 2
 
     def seen(x):                     # how much of the webcam's width a slice starting at x would show
         return max(0, min(x + gw, fx + fw) - max(x, fx))
     starts = {max(0, min(x, src_w - gw)) for x in (middle, fx - gw, fx + fw)}
     gx = min(starts, key=lambda x: (seen(x), abs(x - middle)))
-    pw, ph = PIP_W, PIP_W * fh / fw
-    if ph > PIP_MAX_H:
-        pw, ph = PIP_MAX_H * fw / fh, PIP_MAX_H
-    pw, ph = max(2, int(round(pw / 2)) * 2), max(2, int(round(ph / 2)) * 2)
-    side, top = cam_place(side, top)
-    py = max(0, min(int(H * top / 100), CAP_LOW - CAP_HALF - CAP_GAP - ph))
-    return {"cam": (fx, fy, fw, fh), "game": (gx, 0, gw, src_h),
-            "pip": (PIP_MARGIN if side == "left" else W - pw - PIP_MARGIN, py, pw, ph)}
+    return {"box": (fx, fy, fw, fh), "cam": cam, "game": (gx, 0, gw, src_h)}
 
 
-def _filter(layout, fg_h, facecam=None, src=None, side=None, top=None):
+def _filter(layout, fg_h, facecam=None, src=None, badge=False):
     # The picture people look at is enlarged with the "lanczos" filter, which keeps edges and text sharper than
     # the default when a small stream is blown up to a phone screen. The blurred background does not need it.
-    plan = gameplay_plan(*src, facecam, side, top) if layout == "gameplay" and src else None
+    plan = gameplay_plan(*src, facecam) if layout == "gameplay" and src else None
     if plan:
-        # The game fills the screen, and the webcam sits in the upper part of it, by one side, so a viewer sees
-        # the play and the face at the same time.
-        (fx, fy, fw, fh), (gx, gy, gw, gh), (px, py, pw, ph) = plan["cam"], plan["game"], plan["pip"]
-        return (f"[0:v]fps={config.OUT_FPS},split=2[base][fc];"
-                f"[base]crop={gw}:{gh}:{gx}:{gy},scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"crop={W}:{H},setsar=1[b];"
-                f"[fc]crop={fw}:{fh}:{fx}:{fy},scale={pw}:{ph}:flags=lanczos,setsar=1[p];"
-                f"[b][p]overlay={px}:{py}[v0];")
+        # The webcam on top, the whole width; the game under it; then the line with the channel's name (the
+        # second input, a picture) laid over the edge between them.
+        (cx, cy, cw, ch), (gx, gy, gw, gh) = plan["cam"], plan["game"]
+        fit = "force_original_aspect_ratio=increase:flags=lanczos"
+        out = (f"[0:v]fps={config.OUT_FPS},split=2[g][c];"
+               f"[c]crop={cw}:{ch}:{cx}:{cy},scale={W}:{SPLIT_H}:{fit},crop={W}:{SPLIT_H},setsar=1[top];"
+               f"[g]crop={gw}:{gh}:{gx}:{gy},scale={W}:{GAME_H}:{fit},crop={W}:{GAME_H},setsar=1[bot];"
+               f"[top][bot]vstack=inputs=2")
+        return out + (f"[st];[st][1:v]overlay=0:{SPLIT_H - BADGE_BOX // 2}[v0];" if badge else "[v0];")
     if layout in ("crop", "gameplay"):
         return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1[v0];"
     return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
@@ -325,34 +417,21 @@ def _filter(layout, fg_h, facecam=None, src=None, side=None, top=None):
             f"[bg][fg]overlay=0:(H-h)/2,setsar=1[v0];")
 
 
-def _hook_y(layout, hook_y, facecam=None, src=None, hook="", side=None, top=None):
-    """Where the middle of the heading goes. In the gameplay layout the heading is nearly as wide as the screen,
-    so it can never sit beside the webcam picture without running under it. It stays in its usual place when
-    that is clear of the picture; otherwise it goes just above the picture when its whole box fits below the
-    strip the phone apps cover, and otherwise just under the picture. The box's edges are what is kept clear,
-    not its middle, so a heading on two lines is kept clear too."""
-    plan = gameplay_plan(*src, facecam, side, top) if layout == "gameplay" and src else None
-    if plan:
+def _hook_y(layout, hook_y, facecam=None, src=None, hook=""):
+    """Where the middle of the heading goes. In the gameplay layout: at the top of the game, just under the
+    channel's pill, so it covers neither the pill nor the streamer's face."""
+    if layout == "gameplay" and src and gameplay_plan(*src, facecam):
         shape = _hook_shape(hook)
         bh = shape[4] if shape else 0
-        _, py, _, ph = plan["pip"]
-        if hook_y + bh / 2 + HOOK_GAP <= py or hook_y - bh / 2 - HOOK_GAP >= py + ph:
-            return hook_y
-        above = py - HOOK_GAP - bh / 2
-        if above - bh / 2 >= SAFE_TOP:
-            return int(round(above))
-        return int(round(py + ph + HOOK_GAP + bh / 2))
+        return int(round(SPLIT_H + BADGE_H / 2 + HOOK_GAP + bh / 2))
     return hook_y
 
 
-def _caption_y(layout, cap_y, facecam=None, src=None, side=None, top=None):
-    """Where the middle of the captions goes. In the gameplay layout, a webcam picture set low enough to reach
-    the captions pushes them down to just under it (the picture is never set so low that they do not fit)."""
-    plan = gameplay_plan(*src, facecam, side, top) if layout == "gameplay" and src else None
-    if plan:
-        _, py, _, ph = plan["pip"]
-        if py < cap_y + CAP_HALF + CAP_GAP and py + ph + CAP_GAP > cap_y - CAP_HALF:
-            return py + ph + CAP_GAP + CAP_HALF
+def _caption_y(layout, cap_y, facecam=None, src=None):
+    """Where the middle of the captions goes. In the gameplay layout: low in the game, as low as they can go
+    above the strip the phone apps cover with their own text."""
+    if layout == "gameplay" and src and gameplay_plan(*src, facecam):
+        return CAP_LOW - CAP_HALF
     return cap_y
 
 
@@ -401,11 +480,16 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
         # nothing to show for it, so the whole game is shown with a blurred fill, and the clip says why.
         layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, "blur")
         face, note = None, NO_WEBCAM
-    hook, place = clip.get("hook", ""), cam_place(clip.get("cam_side"), clip.get("cam_top"))
-    hook_y = _hook_y(layout, hook_y, face, (src_w, src_h), _clean(hook), *place)
-    cap_y = _caption_y(layout, cap_y, face, (src_w, src_h), *place)
+    hook = clip.get("hook", "")
+    hook_y = _hook_y(layout, hook_y, face, (src_w, src_h), _clean(hook))
+    cap_y = _caption_y(layout, cap_y, face, (src_w, src_h))
     ass = build_ass(words if clip.get("captions", True) else [], start, end, hook, clip.get("style", "bounce"),
                     clip.get("highlight_words", []), hook_y, cap_y)
+    badge = None
+    if layout == "gameplay":    # the channel's name: the clip's own text, else the one made from its channel
+        text = ((_badge_clean(clip.get("channel_label")) or _badge_clean(clip.get("channel_auto")))
+                if clip.get("show_channel", True) else "")
+        badge = (text, clip.get("channel_platform") or "")
     # The clip is made in a short work folder and moved into place afterwards. The caption step of ffmpeg cannot
     # open files whose full path is longer than 260 characters on Windows, which a data folder deep inside other
     # folders easily reaches. Inside the work folder every name is short and relative (a drive colon would also
@@ -413,21 +497,25 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
     work = Path(tempfile.mkdtemp(prefix="pk"))
     try:
         out = _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, src_size=(src_w, src_h),
-                         place=place, cover_at=cover_at)
+                         badge=badge, cover_at=cover_at)
         out["note"] = note     # also clears an old note once the webcam is found
         return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None, src_size=None, place=(None, None), cover_at=None) -> dict:
+def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None, src_size=None, badge=None, cover_at=None) -> dict:
     global _qsv_ok
     (work / f"{name}.ass").write_text(ass, encoding="utf-8")
     (work / "f").mkdir()
     for f in config.FONTS_DIR.glob("*.ttf"):
         shutil.copyfile(f, work / "f" / f.name)
-    fc = _filter(layout, fg_h, face, src_size, *place) + f"[v0]ass={name}.ass:fontsdir=f[v]"
-    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
+    extra = []
+    if badge is not None:       # the line and the channel's name, a picture laid over the clip
+        make_badge(work / "badge.png", *badge)
+        extra = ["-i", "badge.png"]
+    fc = _filter(layout, fg_h, face, src_size, badge is not None) + f"[v0]ass={name}.ass:fontsdir=f[v]"
+    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src), *extra,
             "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", _loudnorm(src, start, end),
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
     encoders = []

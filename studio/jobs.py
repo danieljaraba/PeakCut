@@ -109,11 +109,11 @@ on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first f
 
 DEFAULTS = {"max_clips": 6, "min_len": 30, "max_len": 90, "style": "bounce", "layout": "blur", "quality": 720,
             "range_start": None, "range_end": None, "captions": True,
-            "cam_side": render.CAM_SIDE, "cam_top": render.CAM_TOP}   # where the webcam goes in the gameplay layout
+            "show_channel": True, "channel_label": ""}   # the channel's name on gameplay clips; "" = made from the channel
 
 
-LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080),
-          "cam_top": render.CAM_TOP_RANGE}
+LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
+CHANNEL_KEYS = ("show_channel", "channel_label", "channel_auto", "channel_platform")   # what a clip keeps of it
 SHARP_LAYOUTS = ("crop", "gameplay")   # these fill the phone screen with a small part of the picture
 
 
@@ -142,10 +142,13 @@ def clean_options(options) -> dict:
     """Only known settings, each inside its allowed range. Raises ValueError on nonsense."""
     out = {}
     for k, v in (options if isinstance(options, dict) else {}).items():
-        if k == "captions":
+        if k in ("captions", "show_channel"):
             if not isinstance(v, bool):
-                raise ValueError("Captions must be on or off.")
+                raise ValueError("Captions must be on or off." if k == "captions" else "Show the channel must be on or off.")
             out[k] = v
+            continue
+        if k == "channel_label":
+            out[k] = render.clean_label(v)
             continue
         if k not in DEFAULTS or v in ("", None):
             continue
@@ -156,8 +159,6 @@ def clean_options(options) -> dict:
             v = v if v in render.STYLES else DEFAULTS["style"]
         elif k == "layout":
             v = v if v in render.LAYOUTS else DEFAULTS["layout"]
-        elif k == "cam_side":
-            v = v if v in ("left", "right") else DEFAULTS["cam_side"]
         else:                                    # range_start, range_end: seconds into the video
             v = float(v)
             if not math.isfinite(v) or v < 0:
@@ -465,7 +466,7 @@ def create(source: dict, options: dict, enqueue=True, creator=None, kind="video"
     if c:
         d = creators.root(c["id"]) / ("live" if kind == "live" else "videos") / jid
         base = {**DEFAULTS, **{k: c.get(k, DEFAULTS[k]) for k in ("max_clips", "min_len", "max_len", "style", "layout", "captions",
-                                                         "cam_side", "cam_top")}}
+                                                         "show_channel", "channel_label")}}
     else:
         d, base, creator = config.user_dir(ctx.uid()) / "jobs" / jid, dict(DEFAULTS), None
     opts = {**base, **clean_options(options)}
@@ -538,9 +539,7 @@ def request_render(jid, cid, changes: dict):
     for k in ("hook", "title", "description", "style", "layout"):
         if k in changes:
             new[k] = str(changes[k])[:{"hook": 60, "title": 100, "description": 2000}.get(k, 20)]
-    if "cam_side" in changes or "cam_top" in changes:     # where the webcam goes, made safe
-        new["cam_side"], new["cam_top"] = render.cam_place(changes.get("cam_side", clip.get("cam_side")),
-                                                           changes.get("cam_top", clip.get("cam_top")))
+    new.update(clean_options({k: changes[k] for k in ("show_channel", "channel_label") if k in changes}))
     if new.get("style") not in render.STYLES:
         new["style"] = DEFAULTS["style"]
     if new.get("layout") not in render.LAYOUTS:
@@ -548,6 +547,28 @@ def request_render(jid, cid, changes: dict):
     clip.update(new, status="queued")
     save(job)
     _q.put(("clip", jid, cid))
+
+
+def _channel(job) -> dict:
+    """The channel's name for a video's clips: whether to show it, the text the person wrote (if any), and the
+    one made from the channel. The channel is the creator's; a video with no creator uses its own link and
+    uploader (a Twitch, Kick or YouTube link), and an uploaded file has none."""
+    o, c = job.get("options") or {}, None
+    if job.get("creator"):
+        try:                       # a background worker may not be acting for anyone: it acts for the video's owner
+            if ctx.uid_or_none() is None and job.get("user"):
+                with ctx.as_user(job["user"]):
+                    c = creators.get(job["creator"])
+            else:
+                c = creators.get(job["creator"])
+        except Exception:  # noqa: BLE001 - a missing creator only means no channel name
+            c = None
+    src = job.get("source") or {}
+    url = (c or {}).get("channel") or (src.get("url", "") if src.get("type") in ("url", "live") else "")
+    name = job.get("uploader") or (c or {}).get("name", "")
+    text, platform = render.channel_badge(url, name=name)
+    return {"show_channel": o.get("show_channel", DEFAULTS["show_channel"]),
+            "channel_label": render.clean_label(o.get("channel_label", "")), "channel_auto": text, "channel_platform": platform}
 
 
 def render_one(job, clip, words):
@@ -561,9 +582,11 @@ def render_one(job, clip, words):
         src = Path(clip["src"]) if clip.get("src") else Path(job["source_path"])
         if not clip.get("src"):
             clip["end"] = min(clip["end"], job["duration"])
-        for k in ("cam_side", "cam_top"):
-            # Where the webcam goes: the clip's own choice, else the video's (live clips are made without it)
-            clip.setdefault(k, (job.get("options") or {}).get(k, DEFAULTS[k]))
+        if any(k not in clip for k in CHANNEL_KEYS):
+            # The channel's name on the video is given to the clip when it is first made, so making it again
+            # later gives the same clip; the clip editor can change it for this clip only.
+            for k, v in _channel(job).items():
+                clip.setdefault(k, v)
         if clip.get("layout") == "gameplay" and not clip.get("facecam"):
             # Chosen after the clip was first made (or the first look found nothing): the webcam is looked for
             # now. What one clip found is kept for the whole video, so other clips of it do not look again.
@@ -1015,7 +1038,6 @@ def _run_job(job):
         nonlocal face
         c = {k: v for k, v in c.items() if k != "block"}
         c.update(id=f"clip{len(job['clips']) + 1:02d}", style=o["style"], layout=o["layout"],
-                 cam_side=o.get("cam_side", DEFAULTS["cam_side"]), cam_top=o.get("cam_top", DEFAULTS["cam_top"]),
                  captions=o.get("captions", True), status="queued", version=0, pick=pick)
         # Only the gameplay layout uses a webcam, so it is only looked for then, and only once: a
         # stream with no webcam is not looked for again on every clip of it.

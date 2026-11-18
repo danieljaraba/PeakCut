@@ -391,13 +391,10 @@ img.av{object-fit:cover}
 .lay-prev .ph i{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:16px;background:linear-gradient(135deg,#FF8B33,#FFB27A)}
 .lay-prev.zoom .ph i{left:-6px;right:-6px;height:24px}
 .lay-prev.crop .ph i{left:0;right:0;top:0;height:100%;transform:none}
-.campos{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center}
-.campos[hidden]{display:none}
-.campos .cp-ctl{display:grid;gap:14px}
-.campos input[type=range]{accent-color:var(--brand);width:100%;margin:0}
-.campos .cp-ends{display:flex;justify-content:space-between;font-weight:400;color:var(--faint)}
-.cp-prev{position:relative;width:54px;height:96px;border-radius:7px;background:#4A3428;overflow:hidden}
-.cp-prev i{position:absolute;width:35%;height:11%;border-radius:3px;background:#FFB27A;border:1px solid #fff}
+.lay-prev.gameplay .ph::before{filter:none;opacity:1}
+.lay-prev.gameplay .ph i{top:0;height:30%;transform:none;background:#FFB27A;border-bottom:2px solid #fff}
+.chanset{display:grid;grid-template-columns:auto minmax(0,1fr);gap:18px;align-items:end}
+.chanset[hidden]{display:none}
 .seg{display:flex;gap:4px;background:#fff;border-radius:10px;padding:4px}
 .composer.compact .seg{background:var(--muted)}
 .seg button{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:7px 6px;border:0;border-radius:7px;background:transparent;color:var(--dim);font-size:13px;font-weight:600;cursor:pointer;transition:background-color .15s ease,color .15s ease}
@@ -915,21 +912,20 @@ const navIc = (n, v) => ic(S.view === v && I[n + "_f"] ? n + "_f" : n);
 const fmt = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s % 60).padStart(2, "0"); };
 const clock = t => new Date(t * 1000).toLocaleString([], {weekday:"short", hour:"2-digit", minute:"2-digit"});
 const when = t => new Date(t * 1000).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
-/* Where the webcam goes in the gameplay layout: a side, a height, and a small phone-shaped picture showing it.
-   `attr` is "k" in the creator's settings and "f" in the clip editor. 20 % and the right side are the defaults. */
-const CAM_TOP = 20;
-const camPos = (attr, c) => {
-  const side = c?.cam_side === "left" ? "left" : "right", top = Number(c?.cam_top ?? CAM_TOP);
-  return `<div class="campos span" data-campos ${c?.layout === "gameplay" ? "" : "hidden"}>
-    <div class="cp-ctl"><label class="f">Webcam side<select data-${attr}="cam_side">${opts({right:"Right", left:"Left"}, side)}</select></label>
-      <label class="f">Webcam height<input type="range" min="3" max="60" step="1" data-${attr}="cam_top" value="${top}">
-        <span class="cp-ends"><span>Top</span><span>Bottom</span></span></label></div>
-    <div class="cp-prev" aria-hidden="true"><i style="top:${top}%;${side}:3%"></i></div></div>`;
+/* The channel's name written on gameplay clips (streamer on top, game below), shown only with that layout.
+   `attr` is "k" in the creator's settings and "f" in the clip editor; `auto` is the text made from the channel,
+   used when the box is left empty. */
+const channelAuto = url => {
+  let u; try { u = new URL(/^https?:\/\//i.test(url || "") ? url : "https://" + url); } catch { return ""; }
+  const h = u.hostname.toLowerCase(), p = u.pathname.split("/").filter(Boolean), first = (p[0] || "").replace(/[^\w.\-]/g, "");
+  if (h.includes("kick")) return first ? `KICK.COM/${first}`.toUpperCase() : "KICK.COM";
+  if (h.includes("twitch")) return first && first !== "videos" ? `TWITCH.TV/${first}`.toUpperCase() : "TWITCH.TV";
+  if (h.includes("youtube") || h === "youtu.be") { const at = p.find(x => x.startsWith("@")); return at ? `YOUTUBE.COM/${at}`.toUpperCase() : "YOUTUBE.COM"; }
+  return "";
 };
-function drawCamPos(box) {
-  const side = box.querySelector('[data-k="cam_side"],[data-f="cam_side"]').value, top = box.querySelector('[data-k="cam_top"],[data-f="cam_top"]').value;
-  const i = box.querySelector(".cp-prev i"); i.style.left = i.style.right = ""; i.style[side] = "3%"; i.style.top = top + "%";
-}
+const channelSet = (attr, c, auto) => `<div class="chanset span" data-chanset ${c?.layout === "gameplay" ? "" : "hidden"}>
+    <label class="sw"><input type="checkbox" data-${attr}="show_channel" ${c?.show_channel === false ? "" : "checked"}>Show the channel</label>
+    <label class="f">Channel name on the video<input data-${attr}="channel_label" maxlength="32" value="${esc(c?.channel_label || "")}" placeholder="${esc(auto || "No channel: type a name")}"></label></div>`;
 const opts = (map, val) => Object.entries(map).map(([k, v]) => `<option value="${esc(k)}"${String(k) === String(val) ? " selected" : ""}>${esc(v)}</option>`).join("");
 
 async function api(path, opt) {
@@ -1408,14 +1404,14 @@ function drawAdd(variant) {
       <div class="ob"><div class="ot">Video quality</div><input type="hidden" id="o_quality" value="720"><div class="seg" role="group" aria-label="Video quality">
         <button type="button" data-seg="o_quality" data-v="720" aria-pressed="true">720p<small>Fast</small></button>
         <button type="button" data-seg="o_quality" data-v="1080" aria-pressed="false">1080p<small>Sharper, about 2x slower</small></button></div>
-        <p class="sub" id="o_quality_note"${["crop", "gameplay"].includes(c?.layout ?? "blur") ? "" : " hidden"}>Fill screen and Gameplay always use 1080p, so the enlarged game stays sharp.</p></div>
+        <p class="sub" id="o_quality_note"${["crop", "gameplay"].includes(c?.layout ?? "blur") ? "" : " hidden"}>Fill screen and Streamer + game always use 1080p, so the enlarged game stays sharp.</p></div>
       <div class="ob"><div class="ot">Part of the video</div><div class="range">
         <label>From<input id="o_from" type="number" min="0" placeholder="start" aria-label="From minute">min</label>${ic("arrowr")}
         <label>To<input id="o_to" type="number" min="0" placeholder="end" aria-label="Up to minute">min</label></div></div>
     </div></div></form>`;
   drawAtt();
 }
-const LAYOUT_SHORT = {blur:"Blurred fill", zoom:"Zoomed in", crop:"Fill screen", gameplay:"Gameplay + facecam"};
+const LAYOUT_SHORT = {blur:"Blurred fill", zoom:"Zoomed in", crop:"Fill screen", gameplay:"Streamer + game"};
 const CAP_LOOK = {bounce:{font:"'Archivo Black'", hl:"#FFFF00", up:true}, hype:{font:"Anton", hl:"#FF3C3C", up:true}, clean:{font:"Poppins", hl:"#6BD7FF", up:false, w:800}};
 function capPrev(k) {
   const s = CAP_LOOK[k] || {font:"inherit", hl:"#FF8B33", up:true};
@@ -1588,7 +1584,7 @@ function onLink(input) {
   if (fullLink(u)) return takeLink(A, u, input);
   linkTimer = setTimeout(() => { if (input.value.trim() === u) takeLink(A, u, input); }, 900);   // other link shapes: take it once typing stops
 }
-document.addEventListener("input", e => { const cp = e.target.closest?.("[data-campos]"); if (cp) drawCamPos(cp);
+document.addEventListener("input", e => {
   if (e.target.id === "url") onLink(e.target);
   if (e.target.closest?.("#cform") && e.target.dataset.k && !/checkbox|radio/.test(e.target.type)) dirty(true); });
 document.addEventListener("keydown", e => { if (e.target.id === "url" && e.key === "Enter" && e.target.value.trim() && looksLink(e.target.value.trim())) { e.preventDefault(); clearTimeout(linkTimer); takeLink(att(), e.target.value.trim(), e.target); } });
@@ -1889,7 +1885,7 @@ function drawCreatorForm() {
       <div class="fields"><label class="sw span"><input type="checkbox" data-k="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
         <label class="f">Caption style<select data-k="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
         <label class="f">Layout<select data-k="layout">${opts(S.status.layouts, c.layout)}</select></label>
-        ${camPos("k", c)}
+        ${channelSet("k", c, channelAuto(c.channel))}
         <label class="f">Game<input data-k="game" value="${esc(c.game || "")}" placeholder="Read from the title"><small class="sub" style="font-weight:400">Left empty, the game is read from the stream's title. Set it for a streamer whose title says nothing: GTA 6, Fortnite, Elden Ring.</small></label>
         <label class="f">Language of the clips<select data-k="language">${opts({auto:"Auto (from what is said)", en:"English", es:"Español"}, c.language || "auto")}</select><small class="sub" style="font-weight:400">Hook, title, description and hashtags are written in this language. Auto reads it from the stream.</small></label>
         <label class="f">Shortest clip (seconds)<input data-k="min_len" type="number" value="${c.min_len}"></label>
@@ -2194,7 +2190,7 @@ function drawClipDlg(full) {
         <label class="sw"><input type="checkbox" data-f="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
         <div class="two"><label class="f">Caption style<select data-f="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
           <label class="f">Layout<select data-f="layout">${opts(S.status.layouts, c.layout)}</select></label></div>
-        ${camPos("f", c)}
+        ${channelSet("f", c, c.channel_auto)}
         ${c.note ? `<div class="note" style="margin:0">${ic("warn")}<span>${esc(c.note)}</span></div>` : ""}
         <div class="two"><label class="f">Start (seconds)<input data-f="start" type="number" step="0.5" value="${c.start}"></label>
           <label class="f">End (seconds)<input data-f="end" type="number" step="0.5" value="${c.end}"></label></div>
@@ -2285,7 +2281,7 @@ document.addEventListener("change", async e => {
     return;
   }
   if (t.dataset.k === "layout" || t.dataset.f === "layout") {
-    const box = t.closest("#cform, #clipdlg")?.querySelector("[data-campos]");
+    const box = t.closest("#cform, #clipdlg")?.querySelector("[data-chanset]");
     if (box) box.hidden = t.value !== "gameplay";
   }
   if (t.hasAttribute("data-caption-toggle")) {

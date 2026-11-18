@@ -217,19 +217,16 @@ try:
         if len(rows) <= 50 or len(cols) <= 50:
             return
         x0, x1, y0, y1 = cols.min(), cols.max() + 1, rows.min(), rows.max() + 1
-        w, h = x1 - x0, y1 - y0
-        check(f"{where}: the webcam's top is {render.CAM_TOP}% of the way down", int(y0),
-              lambda v: abs(v - 1920 * render.CAM_TOP / 100) <= 4)
-        check(f"{where}: ...against the right side", bool(x1 > 1020), True)
-        check(f"{where}: the webcam is not stretched", round(w / h, 2), lambda r: abs(r - CW / CH) < 0.06)
-        s = frame(src, 1.5, SW, SH)[CY: CY + CH, CX: CX + CW]
-        ry = (np.arange(h) * CH / h).astype(int)
-        rx = (np.arange(w) * CW / w).astype(int)
-        off = np.abs(img[y0: y0 + h, x0: x0 + w] - s[ry][:, rx]).mean(2) > 60
-        check(f"{where}: the corner picture is the stream's whole webcam", round(float(off.mean()), 3), lambda v: v < 0.03)
-        outside = m.copy()
-        outside[max(0, y0 - 6): y1 + 6, max(0, x0 - 6): x1 + 6] = False
-        check(f"{where}: the webcam is shown only once", int(outside.sum()), lambda n: n < 200)
+        check(f"{where}: the webcam fills the top part, the whole width", (int(y0) <= 2, int(x0) <= 2, int(x1) >= 1078,
+                                                                         abs(int(y1) - 576) <= 8), (True, True, True, True))
+        # the top part is the stream's webcam, the part chosen for it, scaled: nothing over it, nothing stretched
+        cx, cy, cw, ch = render.gameplay_plan(SW, SH, [CX, CY, CW, CH])["cam"]
+        s = frame(src, 1.5, SW, SH)[cy: cy + ch, cx: cx + cw]
+        ry = (np.arange(520) * ch / 576).astype(int)
+        rx = (np.arange(1080) * cw / 1080).astype(int)
+        off = np.abs(img[:520] - s[ry][:, rx]).mean(2) > 60
+        check(f"{where}: the top part is the stream's webcam", round(float(off.mean()), 3), lambda v: v < 0.03)
+        check(f"{where}: the webcam is shown only once", int(m[620:].sum()), lambda n: n < 200)
 
     face = [b.get("x", CX), b.get("y", CY), b.get("w", CW), b.get("h", CH)]
     clip = {"start": 0.0, "end": 3.0, "layout": "gameplay", "facecam": face, "hook": "A 1080P STREAM",
