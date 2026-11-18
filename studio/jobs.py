@@ -580,6 +580,13 @@ def _run_job(job):
         game = games.detect(job["title"], src.get("name"))[0] or ""
     if game and job.get("game") != game:
         job["game"] = game
+    # The language of the hook and title: what the creator chose in Setup (Auto leaves it to the words).
+    want_lang = ""
+    if job.get("creator"):
+        try:
+            want_lang = (creators.get(job["creator"]) or {}).get("language") or ""
+        except Exception:  # noqa: BLE001
+            want_lang = ""
     t0 = time.time()
     notes = []
     face = False       # where the webcam is in the source, found once; False means not looked for yet
@@ -804,10 +811,13 @@ def _run_job(job):
         cw = [dict(w, s=round(w["s"] - c0, 2), e=round(w["e"] - c0, 2)) for w in words if c0 <= w["s"] < end]
         marks = rewatched[int(c0): int(end) + 1]
         names = [(st - c0, t) for st, en, t in chapters if st < end and (en is None or en > c0)]
+        if not job.get("lang"):      # our own transcript names no language: tell English from Spanish by the words
+            job["lang"] = brain.detect_lang(bw) or ""
         found, ai = brain.find_clips(cw, db[r0:r1], end - c0, job["title"], job["uploader"], keep,
                                      int(o["min_len"]), int(o["max_len"]), notes.append, game=game, rel=loud[r0:r1],
                                      replayed=marks if len(marks) else None, chapters=names,
-                                     ask=keep + 1 if many else None)
+                                     ask=keep + 1 if many else None,
+                                     lang=brain.resolve_lang(want_lang if want_lang in ("en", "es") else job.get("lang"), cw))
         tokens += ai.get("tokens", 0)
         model = ai.get("model") or model
         if ai.get("note"):

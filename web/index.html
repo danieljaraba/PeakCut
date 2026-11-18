@@ -603,6 +603,9 @@ dialog::backdrop{background:rgba(14,12,11,.42);animation:fadein .16s ease}
 .editor video,.editor .stage img{width:100%;max-height:calc(100vh - 48px);aspect-ratio:9/16;object-fit:contain;display:block}
 .editor .panel{padding:22px;overflow:auto;display:flex;flex-direction:column;gap:14px}
 .editor h3{font-size:13px;font-weight:600;color:var(--dim);margin-top:6px}
+.editor .draft{display:grid;gap:6px}
+.editor .draft .dh{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600}
+.editor .draft pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:12px;background:var(--muted);border-radius:8px;padding:9px 11px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:50}
 .toast{background:var(--frame);color:var(--frame-text);border:1px solid var(--frame-2);border-radius:var(--r);padding:12px 16px;max-width:380px;animation:rise .2s ease;display:flex;gap:10px;align-items:center;font-weight:500}
@@ -1861,6 +1864,7 @@ function drawCreatorForm() {
         <label class="f">Caption style<select data-k="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
         <label class="f">Layout<select data-k="layout">${opts(S.status.layouts, c.layout)}</select></label>
         <label class="f">Game<input data-k="game" value="${esc(c.game || "")}" placeholder="Read from the title"><small class="sub" style="font-weight:400">Left empty, the game is read from the stream's title. Set it for a streamer whose title says nothing: GTA 6, Fortnite, Elden Ring.</small></label>
+        <label class="f">Language of the clips<select data-k="language">${opts({auto:"Auto (from what is said)", en:"English", es:"Español"}, c.language || "auto")}</select><small class="sub" style="font-weight:400">Hook, title, description and hashtags are written in this language. Auto reads it from the stream.</small></label>
         <label class="f">Shortest clip (seconds)<input data-k="min_len" type="number" value="${c.min_len}"></label>
         <label class="f">Longest clip (seconds)<input data-k="max_len" type="number" value="${c.max_len}"></label>
         <label class="f">Clips per video<input data-k="max_clips" type="number" value="${c.max_clips}"></label>
@@ -2128,6 +2132,23 @@ async function drawSettings() {
 async function saveSettings() { const d = {}; $$("#sform [data-s]").forEach(i => d[i.dataset.s] = i.value); await send("/api/settings", d, "PUT"); }
 
 /* ============================================================ clip editor */
+/* The post text for each platform, made from the clip's own title, hook, description and hashtags (no AI call, so it
+   works for old clips too, in whatever language the clip was written). Same pieces as the server posts: the
+   description, the hashtags, then the creator's footer line. */
+const noLinks = s => String(s || "").replace(/(?:https?:\/\/|www\.)\S+/gi, "").replace(/\s{2,}/g, " ").trim();
+function postDrafts(c, footer) {
+  const cut = (s, n) => s.length <= n ? s : s.slice(0, n - 1).replace(/\s+\S*$/, "") + "…";
+  const title = noLinks(c.title), desc = noLinks(c.description), hook = noLinks(c.hook);
+  const tags = [...new Set((c.hashtags || []).map(h => String(h).replace(/[^\p{L}\p{N}_]/gu, "")).filter(Boolean))];
+  const hashes = (n, extra) => [...new Set([...tags.slice(0, n), ...(extra ? [extra] : [])])].map(h => "#" + h).join(" ");
+  const join = (...parts) => parts.filter(Boolean).join("\n\n");
+  const foot = (footer || "").trim();
+  return [
+    ["TikTok", join(cut(desc || title, 150), hashes(5), foot)],
+    ["Instagram Reels", join(hook || title, desc, hashes(5), foot)],
+    ["YouTube Shorts", join(cut(title || hook, 100), desc, hashes(5, "Shorts"), foot)],
+  ];
+}
 function openClip(jid, cid) { D.jid = jid; D.cid = cid; D.sig = ""; drawClipDlg(true); $("#clipdlg").showModal(); }
 function drawClipDlg(full) {
   const j = jobOf(D.jid), c = j?.clips.find(x => x.id === D.cid), dlg = $("#clipdlg");
@@ -2152,6 +2173,9 @@ function drawClipDlg(full) {
         <label class="f">Title<input data-f="title" value="${esc(c.title)}"></label>
         <label class="f">Description<textarea data-f="description" rows="2">${esc(c.description)}</textarea></label>
         <button class="btn" data-act="remake">${ic("scissors")}Save and re-make clip</button>
+        <h3>Post text for each platform</h3>
+        ${postDrafts(c, (S.creators.find(x => x.id === j.creator) || {}).post_footer).map(([name, text]) => `<div class="draft"><div class="dh">${name}
+          <button class="btn sm" type="button" data-act="copytext" data-t="${esc(text)}">${ic("copy")}Copy</button></div><pre>${esc(text)}</pre></div>`).join("")}
         <h3>Post it</h3>
         <div id="dposts" class="row" style="gap:4px"></div>
         ${S.accounts.length ? `<div class="row">${S.accounts.map(a => `<label class="ck"><input type="checkbox" data-pacc value="${esc(a.id)}">${esc(a.label)} · ${esc(a.name)}</label>`).join("")}</div>

@@ -1,4 +1,4 @@
-"""Speech to text with word timestamps, using Parakeet 0.6b through sherpa-onnx.
+"""Speech to text with word timestamps, using Parakeet 0.6b (version 3: English, Spanish and other European languages) through sherpa-onnx.
 
 It runs in one of two places. On this machine's processors (the default), or, when PEAKCUT_ASR_URL is set, on a
 separate machine with a graphics card (studio/asr_worker.py), which does the same work many times faster. If that
@@ -281,8 +281,8 @@ def transcribe(audio: np.ndarray, on_progress=None) -> list:
     todo = []
     for a, b in _chunks(audio):
         seg = audio[a:b].astype(np.float32) / 32768.0
-        if len(seg) < 4800 or float(np.sqrt((seg ** 2).mean())) < 0.003:
-            continue  # silence: skip, saves time and avoids made-up words
+        if len(seg) < 4800 or float(np.sqrt(np.square(seg).mean())) < 0.003:
+            continue  # silence: skip, saves time and avoids made-up words (np.square, not **: on Python 3.14 with numpy 2.2 `seg ** 2` overwrites seg)
         todo.append((a, b, seg))
     remote = _remote_ok()
     size = max(1, REMOTE_BATCH if remote else BATCH)
