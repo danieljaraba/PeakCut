@@ -61,7 +61,9 @@ Start the server:
 python -m studio.server
 ```
 
-The first start downloads the speech model by itself (about 480 MB, once).
+The first start downloads the speech model by itself (about 480 MB, once). It understands English and Spanish (and
+other European languages): for a Spanish stream the clips get Spanish hooks, titles, descriptions and captions. Set
+`PEAKCUT_LANGUAGE=es` (or pick the language for a creator in Setup) to force it; the default reads it from what is said.
 
 Open http://127.0.0.1:8765. There is no sign-in: it opens straight into the dashboard. Go to **Settings, AI**, choose
 your AI service, paste your key and press **Save and test** (see [Choose your AI](#choose-your-ai)).
@@ -135,7 +137,7 @@ python -m studio.admin grant you@example.com
 | `tests/` | Tests that run against a throwaway copy of the app |
 | `deploy/`, `Dockerfile`, `docker-compose.yml` | One-server deployment with PostgreSQL and automatic HTTPS |
 
-Video work is done with `ffmpeg` and `yt-dlp`. Speech is transcribed with `sherpa-onnx` and the Parakeet model.
+Video work is done with `ffmpeg` and `yt-dlp`. Speech is transcribed with `sherpa-onnx` and the Parakeet v3 model (English, Spanish and other European languages).
 Data is kept per user: accounts in the database (SQLite on your own computer, PostgreSQL on a server), videos and
 clips in each user's own folder. [AGENTS.md](AGENTS.md) is a short map of the code for contributors and AI coding
 assistants.

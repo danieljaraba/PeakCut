@@ -561,6 +561,13 @@ def _run_job(job):
         game = games.detect(job["title"], src.get("name"))[0] or ""
     if game and job.get("game") != game:
         job["game"] = game
+    # The language of the hook and title: what the creator chose in Setup (Auto leaves it to the words).
+    want_lang = ""
+    if job.get("creator"):
+        try:
+            want_lang = (creators.get(job["creator"]) or {}).get("language") or ""
+        except Exception:  # noqa: BLE001
+            want_lang = ""
     t0 = time.time()
     notes = []
     face = False       # where the webcam is in the source, found once; False means not looked for yet
@@ -735,8 +742,11 @@ def _run_job(job):
             continue
         quota = max(1, math.ceil(left / (len(blocks) - bi)))
         s0 = int((a - lo) / 16000)
+        if not job.get("lang"):      # our own transcript names no language: tell English from Spanish by the words
+            job["lang"] = brain.detect_lang(bw) or ""
         found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game)
+                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game,
+                                     lang=brain.resolve_lang(want_lang if want_lang in ("en", "es") else job.get("lang"), bw))
         tokens += ai.get("tokens", 0)
         model = ai.get("model") or model
         if ai.get("note"):

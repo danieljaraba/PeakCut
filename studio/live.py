@@ -314,6 +314,14 @@ class Session:
             while self.segments and self.segments[0][2] < keep_from:
                 self.segments.pop(0)[0].unlink(missing_ok=True)
 
+    def _lang(self, sample=None):
+        """The language of the clips' hook, title and captions: the creator's choice, else the server's, else what
+        is being said. Spanish is remembered on the recording so the captions stay Spanish."""
+        lang = brain.resolve_lang(self.settings.get("language"), sample) or brain.resolve_lang(self.job.get("lang"))
+        if lang == "es":
+            self.job["lang"] = "es"
+        return lang
+
     # ---------------------------------------------------------------- chat (Twitch only)
     def _chat(self, channel):
         while not self.stop_flag.is_set() and not self.ended:
@@ -471,7 +479,7 @@ class Session:
         try:
             cands, tok = brain.judge_transcript(win, ws, now, title, up, st["min_len"], st["max_len"], self.job["clips"],
                                                 n=1 if every <= 2 else 2, must=must, game=self._game(),
-                                                timeout=config.LIVE_AI_TIMEOUT)  # Auto (0) asks for one
+                                                timeout=config.LIVE_AI_TIMEOUT, lang=self._lang(win))  # Auto (0) asks for one
         except Exception as e:  # noqa: BLE001
             self.job["ai"]["last_error"] = str(e)[-200:]
             return self._verdict(verdict, "AI error: " + str(e)[-80:])
@@ -526,7 +534,8 @@ class Session:
         self.verdicts.append(dict(v, result=result))
         del self.verdicts[:-6]
 
-    CLIP_WORDS = re.compile(r"\bclip(\s+(it|that|this))?\b", re.I)
+    # "clip", "clip it", and in Spanish "clipea", "clipéalo" (accents are taken off before looking)
+    CLIP_WORDS = re.compile(r"\bclip(\s+(it|that|this)|ea|eo|ealo|eala|ealos)?\b", re.I)
     SAID_BEFORE, SAID_AFTER, SAID_GAP = 60, 15, 45
 
     def _triggers(self, new_words):
@@ -534,16 +543,16 @@ class Session:
         transcript is ready; people say it right after something worth clipping. Then the creator's own trigger
         phrases from Setup, which clip straight away with no AI check."""
         for w in new_words or []:
-            if self.CLIP_WORDS.search(re.sub(r"[^a-z' ]", "", w["w"].lower())) and w["s"] - self.last_said > self.SAID_GAP \
+            if self.CLIP_WORDS.search(re.sub(r"[^a-z' ]", "", brain._plain(w["w"]))) and w["s"] - self.last_said > self.SAID_GAP \
                     and not self.said:
                 self.said = {"t": w["s"], "why": 'Someone said "clip"'}
                 self.last_said = w["s"]
         phrases = [p.strip().lower() for p in self.settings.get("trigger_words", "").split(",") if p.strip()]
         if not phrases or not new_words:
             return
-        key = [re.sub(r"[^a-z0-9']", "", w["w"].lower()) for w in new_words]
+        key = [re.sub(r"[^a-z0-9']", "", brain._plain(w["w"])) for w in new_words]
         for p in phrases:
-            parts = [re.sub(r"[^a-z0-9']", "", x) for x in p.split()]
+            parts = [re.sub(r"[^a-z0-9']", "", brain._plain(x)) for x in p.split()]
             for i in range(len(key) - len(parts) + 1):
                 if key[i:i + len(parts)] == parts:
                     t = new_words[i]["s"]
@@ -557,7 +566,7 @@ class Session:
             usage.set_context(self.job["creator"], self.job["title"] or "Live stream")
             try:
                 c = brain.describe(text, self.job["title"], self.job["uploader"], game=self._game(),
-                                   timeout=config.LIVE_AI_TIMEOUT)
+                                   timeout=config.LIVE_AI_TIMEOUT, lang=self._lang(text))
             except Exception as e:  # noqa: BLE001
                 # Someone asked for this clip by hand. A slow or broken AI costs it its hook, not the clip.
                 self.job["ai"]["last_error"] = str(e)[-200:]
@@ -627,7 +636,7 @@ class Session:
         """Where `src` really starts on the transcript clock. The video pieces and the audio feed keep separate
         clocks that drift apart, so transcribe the clip's own audio and line its words up with the live words.
         Local speech model only: no AI calls."""
-        key = lambda w: re.sub(r"[^a-z0-9]", "", w.lower())
+        key = lambda w: re.sub(r"[^a-z0-9]", "", brain._plain(w))
         try:
             wav = src.with_suffix(".wav")
             media.extract_audio(src, wav)
