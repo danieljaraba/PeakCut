@@ -381,6 +381,14 @@ def render_one(job, clip, words):
         src = Path(clip["src"]) if clip.get("src") else Path(job["source_path"])
         if not clip.get("src"):
             clip["end"] = min(clip["end"], job["duration"])
+        if clip.get("layout") == "gameplay" and not clip.get("facecam"):
+            # Chosen after the clip was first made (or the first look found nothing): the webcam is looked for
+            # now. What one clip found is kept for the whole video, so other clips of it do not look again.
+            face = job.get("facecam") or _facecam(job, src)
+            if face:
+                clip["facecam"] = face
+            else:
+                creators.log(job["creator"], "No webcam found in this clip, so the game fills the screen instead.")
         local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
@@ -542,14 +550,15 @@ def _covers(words: list, start: float, end: float) -> bool:
     return len(inside) >= 25 * minutes and inside[-1]["s"] >= start + 0.85 * (end - start)
 
 
-def _facecam(job) -> list | None:
+def _facecam(job, path=None) -> list | None:
     """Where the webcam is in the source: once for the whole video, for every clip of it.
 
     Only a sure answer is used. A box that is a scoreboard drawn over the game would
     put a picture of a scoreboard in the corner of the clip. One frame is also shown to
     the AI, which tells a person from a game character better than any measurement can;
-    what it says is measured again on the picture, so it cannot do any harm."""
-    path = job.get("source_path")
+    what it says is measured again on the picture, so it cannot do any harm.
+    `path` is the video to look in; the whole video when not given."""
+    path = path or job.get("source_path")
     if not path or not Path(path).is_file():
         return None
     try:
