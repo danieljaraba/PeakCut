@@ -17,8 +17,10 @@ The webcam is found by three things a webcam has and a game almost never has:
   joined into a box that is neither.
 - Something moves inside it: the person. The game's own panels (a scoreboard, an
   inventory, a bar of buttons) are boxes that stay still too, but nothing in them
-  moves like a person does. A box with nothing moving in it may still be shown to
-  the AI, but it is never used on its own.
+  moves like a person does. A streamer shown as a drawn character (a VTuber) in a
+  framed box counts too, when a patch of it (the mouth, the eyes) moves now and
+  then. A box with nothing moving in it may still be shown to the AI, but it is
+  never used on its own.
 
 One frame can also be shown to the AI (`detect(path, ask=...)`), which is better
 than any measurement at telling a person from a game character. Its answer is
@@ -52,6 +54,8 @@ EDGE_REL = 2.5             # and this many times more than the picture's usual l
 COVER = 0.80               # how much of a side a line must run along
 END_COVER = 0.75           # and how much of each end of it: the line must reach the corners
 LIFE = 0.03                # how much of a webcam picture must move at some point: the person in it
+AVATAR = 6                 # a drawn character in a framed box: the size of its biggest moving patch (mouth,
+                           # eyes), in pixels of the small picture. Changing numbers on a panel are smaller.
 
 
 def _frames(path: str | Path, count: int = MAX_FRAMES, size: tuple[int, int] | None = (W, H)) -> np.ndarray:
@@ -140,6 +144,15 @@ class _Lines:
         sy = np.abs(sp[2:, 1:-1] - sp[:-2, 1:-1])[1:, :]              # (H-1, W)
         okx = (ex >= te) | (sx[:, :ex.shape[1]] >= ts)
         oky = (ey >= te) | (sy[:ey.shape[0], :] >= ts)
+        # A line that is drawn: a frame round a picture, not only the place where the game stops moving.
+        dv = np.zeros((H, W + 1), dtype=bool)
+        dv[:, 1:W] = ex >= te
+        dh = np.zeros((H + 1, W), dtype=bool)
+        dh[1:H, :] = ey >= te
+        dv = dv | np.roll(dv, 1, axis=1) | np.roll(dv, -1, axis=1)
+        dh = dh | np.roll(dh, 1, axis=0) | np.roll(dh, -1, axis=0)
+        self.dv = np.vstack([np.zeros((1, W + 1)), np.cumsum(dv, axis=0)])
+        self.dh = np.hstack([np.zeros((H + 1, 1)), np.cumsum(dh, axis=1)])
         v = np.zeros((H, W + 1), dtype=bool)
         v[:, 1:W] = okx
         h = np.zeros((H + 1, W), dtype=bool)
@@ -165,6 +178,15 @@ class _Lines:
             return float(c[hi] - c[lo]) / max(1, hi - lo)
         end = max(2, int(round(0.15 * (b - a))))
         return part(a, b), min(part(a, a + end), part(b - end, b))
+
+    def framed(self, x0: int, y0: int, x1: int, y1: int) -> bool:
+        """Whether every side of the box that is not the frame's own edge has a line drawn along it."""
+        for vertical, at, a, b in ((True, x0, y0, y1), (True, x1, y0, y1), (False, y0, x0, x1), (False, y1, x0, x1)):
+            if 0 < at < (W if vertical else H):
+                c = self.dv[:, at] if vertical else self.dh[at, :]
+                if float(c[b] - c[a]) / max(1, b - a) < COVER:
+                    return False
+        return True
 
     def candidates(self, vertical: bool, limit: int = 18) -> list[int]:
         """The places where a long still line runs: the sides a webcam box could have."""
@@ -232,7 +254,53 @@ def _alive(x0, y0, x1, y1, still, game) -> float:
     return float(patch.mean())
 
 
-def _boxes(lines: _Lines, still, light) -> list[dict]:
+def _events(frames: np.ndarray, still: np.ndarray) -> np.ndarray:
+    """Which pixels change now and then: in at least two frames, away from their usual value.
+
+    A drawn character (a VTuber) is mostly still and only opens its mouth or blinks in a few frames, which
+    the middle-half measure of `_stillness` cannot see. Frames where the still parts of the picture all
+    change at once (a "starting soon" or "be right back" screen) are left out."""
+    f = frames.astype(np.float32)
+    med = np.median(f, axis=0)
+    game = float(np.median(still))
+    cut = max(2 * STILL_MIN, 0.15 * game)
+    off = np.abs(f - med) > cut
+    calm = still < cut
+    if calm.any():
+        normal = off[:, calm].mean(axis=1) < 0.3
+        off = off[normal]
+    return off.sum(axis=0) >= 2
+
+
+def _patch(x0, y0, x1, y1, events) -> int:
+    """The biggest patch of the box that changes now and then, in pixels, away from its border. Thin
+    strokes (numbers that change on a panel) are worn away first, so they hardly count."""
+    px, py = int(round(0.1 * (x1 - x0))), int(round(0.1 * (y1 - y0)))
+    m = events[int(y0) + py:int(y1) - py, int(x0) + px:int(x1) - px]
+    if m.shape[0] < 3 or m.shape[1] < 3:
+        return 0
+    core = m[1:-1, 1:-1].copy()
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            core &= m[1 + dy:m.shape[0] - 1 + dy, 1 + dx:m.shape[1] - 1 + dx]
+    best, seen = 0, np.zeros_like(core)
+    for y, x in zip(*np.nonzero(core)):
+        if seen[y, x]:
+            continue
+        stack, n = [(y, x)], 0
+        seen[y, x] = True
+        while stack:
+            a, b = stack.pop()
+            n += 1
+            for c, d in ((a + 1, b), (a - 1, b), (a, b + 1), (a, b - 1)):
+                if 0 <= c < core.shape[0] and 0 <= d < core.shape[1] and core[c, d] and not seen[c, d]:
+                    seen[c, d] = True
+                    stack.append((c, d))
+        best = max(best, n)
+    return best
+
+
+def _boxes(lines: _Lines, still, light, events=None) -> list[dict]:
     """Every rectangle whose sides are all still lines from corner to corner, that could be a camera.
 
     Best first: one with a person moving in it before one without, and of those the bigger, so a webcam
@@ -261,10 +329,22 @@ def _boxes(lines: _Lines, still, light) -> list[dict]:
                         continue
                     alive = _alive(x0, y0, x1, y1, still, game)
                     score = min(c for c, _ in sides)
+                    sure = alive >= LIFE
+                    if not sure and events is not None and lines.framed(x0, y0, x1, y1):
+                        # a framed picture with a mouth or eyes that move now and then: a drawn character
+                        sure = _patch(x0, y0, x1, y1, events) >= AVATAR
                     out.append({"x": x0, "y": y0, "x1": x1, "y1": y1, "score": round(score, 2),
-                                "moving": moving, "alive": round(alive, 3),
-                                "key": (alive >= LIFE, (x1 - x0) * (y1 - y0), score)})
-    return sorted(out, key=lambda c: c["key"], reverse=True)
+                                "moving": moving, "alive": round(alive, 3), "sure": sure})
+    # How much of a box moves is a share of the box, so the same person in a bigger box is a smaller share.
+    # A still line inside the webcam (a door frame, a shelf) makes a smaller box round the person, and the
+    # whole webcam, with more still room in it, could fall under the bar while that smaller box does not.
+    # A box that holds a box with a person in it, and is itself still with lines all round, has that person
+    # in it too: it is the webcam, and the smaller one is a piece of it.
+    for b in out:
+        if not b["sure"]:
+            b["sure"] = any(a["sure"] and a["x"] >= b["x"] and a["y"] >= b["y"] and a["x1"] <= b["x1"]
+                            and a["y1"] <= b["y1"] for a in out)
+    return sorted(out, key=lambda c: (c["sure"], (c["x1"] - c["x"]) * (c["y1"] - c["y"]), c["score"]), reverse=True)
 
 
 def _overlap(a, box) -> float:
@@ -439,7 +519,7 @@ def detect(path: str | Path, ask=None) -> dict | None:
         if looked and not hinted:
             return None                    # it looked, and there is no webcam on this stream
     lines = _Lines(frames, still)
-    found = _boxes(lines, still, light)
+    found = _boxes(lines, still, light, _events(frames, still))
     full = _frames(path, FULL_FRAMES, size=None) if (found or (looked and hinted)) else None
     if looked and hinted:
         # The model is better than any measurement at saying "that is a person", and worse at saying
@@ -454,4 +534,4 @@ def detect(path: str | Path, ask=None) -> dict | None:
     if not found:
         return None
     best = found[0]
-    return _finish(full, best, w, h, still, sure=best["alive"] >= LIFE)
+    return _finish(full, best, w, h, still, sure=best["sure"])
