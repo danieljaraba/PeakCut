@@ -391,6 +391,13 @@ img.av{object-fit:cover}
 .lay-prev .ph i{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:16px;background:linear-gradient(135deg,#FF8B33,#FFB27A)}
 .lay-prev.zoom .ph i{left:-6px;right:-6px;height:24px}
 .lay-prev.crop .ph i{left:0;right:0;top:0;height:100%;transform:none}
+.campos{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:center}
+.campos[hidden]{display:none}
+.campos .cp-ctl{display:grid;gap:14px}
+.campos input[type=range]{accent-color:var(--brand);width:100%;margin:0}
+.campos .cp-ends{display:flex;justify-content:space-between;font-weight:400;color:var(--faint)}
+.cp-prev{position:relative;width:54px;height:96px;border-radius:7px;background:#4A3428;overflow:hidden}
+.cp-prev i{position:absolute;width:35%;height:11%;border-radius:3px;background:#FFB27A;border:1px solid #fff}
 .seg{display:flex;gap:4px;background:#fff;border-radius:10px;padding:4px}
 .composer.compact .seg{background:var(--muted)}
 .seg button{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;padding:7px 6px;border:0;border-radius:7px;background:transparent;color:var(--dim);font-size:13px;font-weight:600;cursor:pointer;transition:background-color .15s ease,color .15s ease}
@@ -908,6 +915,21 @@ const navIc = (n, v) => ic(S.view === v && I[n + "_f"] ? n + "_f" : n);
 const fmt = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s % 60).padStart(2, "0"); };
 const clock = t => new Date(t * 1000).toLocaleString([], {weekday:"short", hour:"2-digit", minute:"2-digit"});
 const when = t => new Date(t * 1000).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"});
+/* Where the webcam goes in the gameplay layout: a side, a height, and a small phone-shaped picture showing it.
+   `attr` is "k" in the creator's settings and "f" in the clip editor. 20 % and the right side are the defaults. */
+const CAM_TOP = 20;
+const camPos = (attr, c) => {
+  const side = c?.cam_side === "left" ? "left" : "right", top = Number(c?.cam_top ?? CAM_TOP);
+  return `<div class="campos span" data-campos ${c?.layout === "gameplay" ? "" : "hidden"}>
+    <div class="cp-ctl"><label class="f">Webcam side<select data-${attr}="cam_side">${opts({right:"Right", left:"Left"}, side)}</select></label>
+      <label class="f">Webcam height<input type="range" min="3" max="60" step="1" data-${attr}="cam_top" value="${top}">
+        <span class="cp-ends"><span>Top</span><span>Bottom</span></span></label></div>
+    <div class="cp-prev" aria-hidden="true"><i style="top:${top}%;${side}:3%"></i></div></div>`;
+};
+function drawCamPos(box) {
+  const side = box.querySelector('[data-k="cam_side"],[data-f="cam_side"]').value, top = box.querySelector('[data-k="cam_top"],[data-f="cam_top"]').value;
+  const i = box.querySelector(".cp-prev i"); i.style.left = i.style.right = ""; i.style[side] = "3%"; i.style.top = top + "%";
+}
 const opts = (map, val) => Object.entries(map).map(([k, v]) => `<option value="${esc(k)}"${String(k) === String(val) ? " selected" : ""}>${esc(v)}</option>`).join("");
 
 async function api(path, opt) {
@@ -1563,7 +1585,8 @@ function onLink(input) {
   if (fullLink(u)) return takeLink(A, u, input);
   linkTimer = setTimeout(() => { if (input.value.trim() === u) takeLink(A, u, input); }, 900);   // other link shapes: take it once typing stops
 }
-document.addEventListener("input", e => { if (e.target.id === "url") onLink(e.target);
+document.addEventListener("input", e => { const cp = e.target.closest?.("[data-campos]"); if (cp) drawCamPos(cp);
+  if (e.target.id === "url") onLink(e.target);
   if (e.target.closest?.("#cform") && e.target.dataset.k && !/checkbox|radio/.test(e.target.type)) dirty(true); });
 document.addEventListener("keydown", e => { if (e.target.id === "url" && e.key === "Enter" && e.target.value.trim() && looksLink(e.target.value.trim())) { e.preventDefault(); clearTimeout(linkTimer); takeLink(att(), e.target.value.trim(), e.target); } });
 document.addEventListener("click", e => {
@@ -1863,6 +1886,7 @@ function drawCreatorForm() {
       <div class="fields"><label class="sw span"><input type="checkbox" data-k="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
         <label class="f">Caption style<select data-k="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
         <label class="f">Layout<select data-k="layout">${opts(S.status.layouts, c.layout)}</select></label>
+        ${camPos("k", c)}
         <label class="f">Game<input data-k="game" value="${esc(c.game || "")}" placeholder="Read from the title"><small class="sub" style="font-weight:400">Left empty, the game is read from the stream's title. Set it for a streamer whose title says nothing: GTA 6, Fortnite, Elden Ring.</small></label>
         <label class="f">Language of the clips<select data-k="language">${opts({auto:"Auto (from what is said)", en:"English", es:"Español"}, c.language || "auto")}</select><small class="sub" style="font-weight:400">Hook, title, description and hashtags are written in this language. Auto reads it from the stream.</small></label>
         <label class="f">Shortest clip (seconds)<input data-k="min_len" type="number" value="${c.min_len}"></label>
@@ -2167,6 +2191,8 @@ function drawClipDlg(full) {
         <label class="sw"><input type="checkbox" data-f="captions" data-caption-toggle ${c.captions === false ? "" : "checked"}>Generate captions</label>
         <div class="two"><label class="f">Caption style<select data-f="style" data-caption-style ${c.captions === false ? "disabled" : ""}>${opts(S.status.styles, c.style)}</select></label>
           <label class="f">Layout<select data-f="layout">${opts(S.status.layouts, c.layout)}</select></label></div>
+        ${camPos("f", c)}
+        ${c.note ? `<div class="note" style="margin:0">${ic("warn")}<span>${esc(c.note)}</span></div>` : ""}
         <div class="two"><label class="f">Start (seconds)<input data-f="start" type="number" step="0.5" value="${c.start}"></label>
           <label class="f">End (seconds)<input data-f="end" type="number" step="0.5" value="${c.end}"></label></div>
         <h3>Post text</h3>
@@ -2254,6 +2280,10 @@ document.addEventListener("change", async e => {
     const toggle = $("#o_captions"), c = S.creators.find(c => c.id === t.value);
     if (!toggle.dataset.overridden) { toggle.checked = c?.captions !== false; syncCaptionStyle(toggle); }
     return;
+  }
+  if (t.dataset.k === "layout" || t.dataset.f === "layout") {
+    const box = t.closest("#cform, #clipdlg")?.querySelector("[data-campos]");
+    if (box) box.hidden = t.value !== "gameplay";
   }
   if (t.hasAttribute("data-caption-toggle")) {
     if (t.id === "o_captions") t.dataset.overridden = "true";

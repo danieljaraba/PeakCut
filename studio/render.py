@@ -127,12 +127,13 @@ def geometry(src_w, src_h, layout):
     return layout, fg_h, max(230, top - 190), min(1640, top + fg_h + 180)
 
 
-def _hook_events(hook, dur, y):
-    """The heading: dark text in a white rounded box that fits it, on one line or two balanced ones."""
+def _hook_shape(hook):
+    """How the heading is laid out: its lines, letter size, line height, and the width and height of its box.
+    None when there is no heading."""
     f, size = _Font.get(HOOK["font"]), HOOK["size"]
     words = hook.split()
     if not words:
-        return []
+        return None
     lines = [" ".join(words)]
     if f.width(lines[0], size) > HOOK["max_w"] and len(words) > 1:      # two lines, split where they come out most even
         cut = min(range(1, len(words)), key=lambda i: max(f.width(" ".join(words[:i]), size), f.width(" ".join(words[i:]), size)))
@@ -142,7 +143,16 @@ def _hook_events(hook, dur, y):
         size = max(40, int(size * HOOK["max_w"] / widest))
         widest = max(f.width(l, size) for l in lines)
     line_h = f.em(size) * 1.16
-    bw, bh = widest + 2 * HOOK["pad_x"], line_h * len(lines) + 2 * HOOK["pad_y"]
+    return lines, size, line_h, widest + 2 * HOOK["pad_x"], line_h * len(lines) + 2 * HOOK["pad_y"]
+
+
+def _hook_events(hook, dur, y):
+    """The heading: dark text in a white rounded box that fits it, on one line or two balanced ones."""
+    shape = _hook_shape(hook)
+    if not shape:
+        return []
+    f = _Font.get(HOOK["font"])
+    lines, size, line_h, bw, bh = shape
     x0, y0, r = (W - bw) / 2, y - bh / 2, min(HOOK["radius"], bh / 2)
     x1, y1 = x0 + bw, y0 + bh
     n = lambda v: f"{v:.0f}"                                                         # noqa: E731
@@ -230,24 +240,83 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return head + "\n".join(ev) + "\n"
 
 
-PIP_W = 380            # how wide the facecam is in the 1080-wide frame
-PIP_MARGIN = 26
+PIP_W = 380            # how wide the webcam picture is in the 1080-wide frame
+PIP_MAX_H = 520        # and the tallest it may be: a webcam turned upright would otherwise cover a third of the screen
+PIP_MARGIN = 26        # its distance from the side of the frame
+CAM_SIDE = "right"     # which side of the clip the webcam picture sits on, unless the creator or clip says otherwise
+CAM_TOP = 20           # how far down its top edge sits, as a percent of the height (20 % of 1920 is 384 pixels):
+                       # low enough to be seen with the face in it, not hidden up in the corner
+CAM_TOP_RANGE = (3, 60)  # the highest and lowest it may be set to
+CAP_HALF = 130         # half the height of a line of captions, with room for the word that pops up bigger
+CAP_GAP = 40           # the space kept between the webcam picture and the captions
+CAP_LOW = 1640         # the lowest the captions go: below this the phone apps put their own text
+SAFE_TOP = 120         # the strip at the very top that the phone apps cover with their own buttons
+HOOK_GAP = 24          # the space between the webcam picture and the heading
+NO_WEBCAM = "No webcam was found in this stream, so the whole game is shown with a blurred fill instead."
 
 
-def _filter(layout, fg_h, facecam=None):
+def cam_place(side=None, top=None):
+    """The webcam position asked for, made safe: a side ("right" or "left") and a whole percent inside the range."""
+    side = side if side in ("left", "right") else CAM_SIDE
+    try:
+        top = int(round(float(top)))
+    except (TypeError, ValueError):
+        top = CAM_TOP
+    return side, max(CAM_TOP_RANGE[0], min(CAM_TOP_RANGE[1], top))
+
+
+def gameplay_plan(src_w, src_h, facecam, side=None, top=None):
+    """Where everything goes in the gameplay layout, or None when the webcam box cannot be used.
+
+    "cam" is the webcam box in the stream, trimmed to the stream's edges.
+    "game" is the upright slice of the stream that fills the phone screen behind it (x, y, width, height).
+    "pip" is where the webcam picture sits in the 1080x1920 clip (x, y, width, height): against the chosen side,
+    with its top edge `top` percent of the way down. A tall picture set very low is lifted just enough to leave
+    room for the captions under it.
+
+    Which slice of the game is shown: a phone screen is much narrower than a stream, so only about a third
+    of its width fits. The middle is used, as that is where games put the action. When the webcam is inside
+    that middle part, it would be seen twice (once in the corner, once behind it), so the slice moves just far
+    enough to one side to leave the webcam out, to whichever side keeps it closest to the middle. When the
+    webcam is too wide to leave out on either side, the slice that shows the least of it is used."""
+    if not facecam or len(facecam) != 4 or not src_w or not src_h:
+        return None
+    fx, fy, fw, fh = (int(round(float(v))) for v in facecam)
+    fx, fy = max(0, min(fx, src_w - 1)), max(0, min(fy, src_h - 1))
+    fw, fh = min(fw, src_w - fx), min(fh, src_h - fy)
+    if fw <= 8 or fh <= 8:
+        return None
+    gw = min(src_w, int(src_h * W / H) // 2 * 2)
+    middle = (src_w - gw) // 2
+
+    def seen(x):                     # how much of the webcam's width a slice starting at x would show
+        return max(0, min(x + gw, fx + fw) - max(x, fx))
+    starts = {max(0, min(x, src_w - gw)) for x in (middle, fx - gw, fx + fw)}
+    gx = min(starts, key=lambda x: (seen(x), abs(x - middle)))
+    pw, ph = PIP_W, PIP_W * fh / fw
+    if ph > PIP_MAX_H:
+        pw, ph = PIP_MAX_H * fw / fh, PIP_MAX_H
+    pw, ph = max(2, int(round(pw / 2)) * 2), max(2, int(round(ph / 2)) * 2)
+    side, top = cam_place(side, top)
+    py = max(0, min(int(H * top / 100), CAP_LOW - CAP_HALF - CAP_GAP - ph))
+    return {"cam": (fx, fy, fw, fh), "game": (gx, 0, gw, src_h),
+            "pip": (PIP_MARGIN if side == "left" else W - pw - PIP_MARGIN, py, pw, ph)}
+
+
+def _filter(layout, fg_h, facecam=None, src=None, side=None, top=None):
     # The picture people look at is enlarged with the "lanczos" filter, which keeps edges and text sharper than
     # the default when a small stream is blown up to a phone screen. The blurred background does not need it.
-    if layout == "gameplay" and facecam:
-        # The game fills the screen, and the webcam sits in the top corner of it, so a viewer sees
+    plan = gameplay_plan(*src, facecam, side, top) if layout == "gameplay" and src else None
+    if plan:
+        # The game fills the screen, and the webcam sits in the upper part of it, by one side, so a viewer sees
         # the play and the face at the same time.
-        fx, fy, fw, fh = (int(v) for v in facecam)
-        if fw > 8 and fh > 8:
-            pip_h = max(2, int(round(PIP_W * fh / fw)))
-            return (f"[0:v]fps={config.OUT_FPS},split=2[base][fc];"
-                    f"[base]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1[b];"
-                    f"[fc]crop={fw}:{fh}:{fx}:{fy},scale={PIP_W}:{pip_h}:flags=lanczos,setsar=1[p];"
-                    f"[b][p]overlay={W - PIP_W - PIP_MARGIN}:{PIP_MARGIN}[v0];")
-    if layout == "crop" or (layout == "gameplay" and not facecam):
+        (fx, fy, fw, fh), (gx, gy, gw, gh), (px, py, pw, ph) = plan["cam"], plan["game"], plan["pip"]
+        return (f"[0:v]fps={config.OUT_FPS},split=2[base][fc];"
+                f"[base]crop={gw}:{gh}:{gx}:{gy},scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={W}:{H},setsar=1[b];"
+                f"[fc]crop={fw}:{fh}:{fx}:{fy},scale={pw}:{ph}:flags=lanczos,setsar=1[p];"
+                f"[b][p]overlay={px}:{py}[v0];")
+    if layout in ("crop", "gameplay"):
         return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1[v0];"
     return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
             f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=6:2,"
@@ -256,12 +325,35 @@ def _filter(layout, fg_h, facecam=None):
             f"[bg][fg]overlay=0:(H-h)/2,setsar=1[v0];")
 
 
-def _hook_y(layout, hook_y, facecam=None):
-    """Where the heading goes. In the gameplay layout the webcam sits in the top corner, so a heading
-    across the top would run under it: it goes just below the picture instead."""
-    if layout == "gameplay" and facecam and len(facecam) == 4 and facecam[2] > 8:
-        return PIP_MARGIN + int(round(PIP_W * facecam[3] / facecam[2])) + 32
+def _hook_y(layout, hook_y, facecam=None, src=None, hook="", side=None, top=None):
+    """Where the middle of the heading goes. In the gameplay layout the heading is nearly as wide as the screen,
+    so it can never sit beside the webcam picture without running under it. It stays in its usual place when
+    that is clear of the picture; otherwise it goes just above the picture when its whole box fits below the
+    strip the phone apps cover, and otherwise just under the picture. The box's edges are what is kept clear,
+    not its middle, so a heading on two lines is kept clear too."""
+    plan = gameplay_plan(*src, facecam, side, top) if layout == "gameplay" and src else None
+    if plan:
+        shape = _hook_shape(hook)
+        bh = shape[4] if shape else 0
+        _, py, _, ph = plan["pip"]
+        if hook_y + bh / 2 + HOOK_GAP <= py or hook_y - bh / 2 - HOOK_GAP >= py + ph:
+            return hook_y
+        above = py - HOOK_GAP - bh / 2
+        if above - bh / 2 >= SAFE_TOP:
+            return int(round(above))
+        return int(round(py + ph + HOOK_GAP + bh / 2))
     return hook_y
+
+
+def _caption_y(layout, cap_y, facecam=None, src=None, side=None, top=None):
+    """Where the middle of the captions goes. In the gameplay layout, a webcam picture set low enough to reach
+    the captions pushes them down to just under it (the picture is never set so low that they do not fit)."""
+    plan = gameplay_plan(*src, facecam, side, top) if layout == "gameplay" and src else None
+    if plan:
+        _, py, _, ph = plan["pip"]
+        if py < cap_y + CAP_HALF + CAP_GAP and py + ph + CAP_GAP > cap_y - CAP_HALF:
+            return py + ph + CAP_GAP + CAP_HALF
+    return cap_y
 
 
 LOUDNESS = "I=-14:TP=-1.5:LRA=11"      # how loud a finished clip is: the level the short-video apps play at
@@ -302,11 +394,16 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
     out_dir.mkdir(parents=True, exist_ok=True)
     start, end = clip["start"], clip["end"]
     layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, clip.get("layout", "blur"))
-    face = clip.get("facecam")
-    if layout == "gameplay" and not (face and len(face) == 4):
-        layout = "crop"     # no webcam found: the game fills the screen, which is still the right shape
-    hook_y = _hook_y(layout, hook_y, face)
-    ass = build_ass(words if clip.get("captions", True) else [], start, end, clip.get("hook", ""), clip.get("style", "bounce"),
+    face, note = clip.get("facecam"), None
+    if layout == "gameplay" and not gameplay_plan(src_w, src_h, face):
+        # No webcam to put in the corner. Cutting the middle out of the game would lose most of it with
+        # nothing to show for it, so the whole game is shown with a blurred fill, and the clip says why.
+        layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, "blur")
+        face, note = None, NO_WEBCAM
+    hook, place = clip.get("hook", ""), cam_place(clip.get("cam_side"), clip.get("cam_top"))
+    hook_y = _hook_y(layout, hook_y, face, (src_w, src_h), _clean(hook), *place)
+    cap_y = _caption_y(layout, cap_y, face, (src_w, src_h), *place)
+    ass = build_ass(words if clip.get("captions", True) else [], start, end, hook, clip.get("style", "bounce"),
                     clip.get("highlight_words", []), hook_y, cap_y)
     # The clip is made in a short work folder and moved into place afterwards. The caption step of ffmpeg cannot
     # open files whose full path is longer than 260 characters on Windows, which a data folder deep inside other
@@ -314,18 +411,21 @@ def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, sr
     # break the filter syntax).
     work = Path(tempfile.mkdtemp(prefix="pk"))
     try:
-        return _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face)
+        out = _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass, face=face, src_size=(src_w, src_h),
+                         place=place)
+        out["note"] = note     # also clears an old note once the webcam is found
+        return out
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None) -> dict:
+def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str, face=None, src_size=None, place=(None, None)) -> dict:
     global _qsv_ok
     (work / f"{name}.ass").write_text(ass, encoding="utf-8")
     (work / "f").mkdir()
     for f in config.FONTS_DIR.glob("*.ttf"):
         shutil.copyfile(f, work / "f" / f.name)
-    fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[v]"
+    fc = _filter(layout, fg_h, face, src_size, *place) + f"[v0]ass={name}.ass:fontsdir=f[v]"
     base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
             "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", _loudnorm(src, start, end),
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]

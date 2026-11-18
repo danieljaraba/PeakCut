@@ -266,18 +266,27 @@ try:
         check("an answer that is neither is not believed", brain.look_for_facecam(b"jpeg")["looked"], False)
 
     # ---- the layout: the game fills the screen and the webcam sits in the corner
-    f = render._filter("gameplay", 1920, [0, 0, 300, 170])
+    f = render._filter("gameplay", 1920, [0, 0, 300, 170], (1280, 720))
     check("the game fills the screen", "scale=1080:1920" in f and "crop=1080:1920" in f, True)
     check("the webcam is cropped out of the source", "crop=300:170:0:0" in f, True)
     check("the webcam is put in the corner", "overlay=" in f, True)
     check("without a webcam the game simply fills the screen",
           "scale=1080:1920" in render._filter("gameplay", 1920, None) and "overlay=" not in render._filter("gameplay", 1920, None), True)
     check("the layout is offered to the user", "gameplay" in render.LAYOUTS, True)
-    # the heading must not run under the webcam picture
-    pip_h = 380 * 376 / 363
-    check("the heading goes below the webcam picture", render._hook_y("gameplay", 300, [0, 0, 363, 376]) > 26 + pip_h, True)
-    check("another picture moves the heading with it",
-          render._hook_y("gameplay", 300, [0, 0, 300, 170]) < render._hook_y("gameplay", 300, [0, 0, 363, 376]), True)
+    # the heading must never run under the webcam picture: above it when it fits, otherwise below it
+    def clear(face, hook):
+        _, py, _, ph = render.gameplay_plan(1280, 720, face)["pip"]
+        y, bh = render._hook_y("gameplay", 300, face, (1280, 720), hook), render._hook_shape(hook)[4]
+        return y + bh / 2 <= py or y - bh / 2 >= py + ph, y - bh / 2 >= render.SAFE_TOP
+    for hook in ("SHORT", "A HEADING LONG ENOUGH TO TAKE TWO WHOLE LINES"):
+        for face in ([0, 0, 363, 376], [0, 0, 300, 170], [900, 400, 120, 400]):
+            check(f"the heading ({len(hook)} letters) stays off a {face[2]}x{face[3]} webcam and off the apps' buttons",
+                  clear(face, hook), (True, True))
+    _, py, _, _ = render.gameplay_plan(1280, 720, [0, 0, 300, 170])["pip"]
+    check("the heading goes above the webcam when it fits", render._hook_y("gameplay", 300, [0, 0, 300, 170], (1280, 720), "HI") < py, True)
+    _, py, _, ph = render.gameplay_plan(1280, 720, [0, 0, 300, 170], "right", 8)["pip"]     # high up: no room above it
+    check("...and below it when it does not",
+          render._hook_y("gameplay", 300, [0, 0, 300, 170], (1280, 720), "HI", "right", 8) > py + ph, True)
     check("without a webcam the heading stays at the top", render._hook_y("crop", 300, None), 300)
 finally:
     shutil.rmtree(work, ignore_errors=True)      # the pictures are big; they must not be left behind

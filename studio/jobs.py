@@ -108,10 +108,12 @@ _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
 DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
-            "range_start": None, "range_end": None, "captions": True}
+            "range_start": None, "range_end": None, "captions": True,
+            "cam_side": render.CAM_SIDE, "cam_top": render.CAM_TOP}   # where the webcam goes in the gameplay layout
 
 
-LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
+LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080),
+          "cam_top": render.CAM_TOP_RANGE}
 
 
 def clean_options(options) -> dict:
@@ -132,6 +134,8 @@ def clean_options(options) -> dict:
             v = v if v in render.STYLES else DEFAULTS["style"]
         elif k == "layout":
             v = v if v in render.LAYOUTS else DEFAULTS["layout"]
+        elif k == "cam_side":
+            v = v if v in ("left", "right") else DEFAULTS["cam_side"]
         else:                                    # range_start, range_end: seconds into the video
             v = float(v)
             if not math.isfinite(v) or v < 0:
@@ -286,7 +290,8 @@ def create(source: dict, options: dict, enqueue=True, creator=None, kind="video"
     c = creators.get(creator) if creator else None
     if c:
         d = creators.root(c["id"]) / ("live" if kind == "live" else "videos") / jid
-        base = {**DEFAULTS, **{k: c[k] for k in ("max_clips", "min_len", "max_len", "style", "layout", "captions")}}
+        base = {**DEFAULTS, **{k: c.get(k, DEFAULTS[k]) for k in ("max_clips", "min_len", "max_len", "style", "layout", "captions",
+                                                         "cam_side", "cam_top")}}
     else:
         d, base, creator = config.user_dir(ctx.uid()) / "jobs" / jid, dict(DEFAULTS), None
     opts = {**base, **clean_options(options)}
@@ -359,6 +364,9 @@ def request_render(jid, cid, changes: dict):
     for k in ("hook", "title", "description", "style", "layout"):
         if k in changes:
             new[k] = str(changes[k])[:{"hook": 60, "title": 100, "description": 2000}.get(k, 20)]
+    if "cam_side" in changes or "cam_top" in changes:     # where the webcam goes, made safe
+        new["cam_side"], new["cam_top"] = render.cam_place(changes.get("cam_side", clip.get("cam_side")),
+                                                           changes.get("cam_top", clip.get("cam_top")))
     if new.get("style") not in render.STYLES:
         new["style"] = DEFAULTS["style"]
     if new.get("layout") not in render.LAYOUTS:
@@ -379,6 +387,9 @@ def render_one(job, clip, words):
         src = Path(clip["src"]) if clip.get("src") else Path(job["source_path"])
         if not clip.get("src"):
             clip["end"] = min(clip["end"], job["duration"])
+        for k in ("cam_side", "cam_top"):
+            # Where the webcam goes: the clip's own choice, else the video's (live clips are made without it)
+            clip.setdefault(k, (job.get("options") or {}).get(k, DEFAULTS[k]))
         if clip.get("layout") == "gameplay" and not clip.get("facecam"):
             # Chosen after the clip was first made (or the first look found nothing): the webcam is looked for
             # now. What one clip found is kept for the whole video, so other clips of it do not look again.
@@ -386,7 +397,7 @@ def render_one(job, clip, words):
             if face:
                 clip["facecam"] = face
             else:
-                creators.log(job["creator"], "No webcam found in this clip, so the game fills the screen instead.")
+                creators.log(job["creator"], "No webcam found in this clip, so the whole game is shown with a blurred fill instead.")
         local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
@@ -778,6 +789,7 @@ def _run_job(job):
         nonlocal face
         c = {k: v for k, v in c.items() if k != "block"}
         c.update(id=f"clip{len(job['clips']) + 1:02d}", style=o["style"], layout=o["layout"],
+                 cam_side=o.get("cam_side", DEFAULTS["cam_side"]), cam_top=o.get("cam_top", DEFAULTS["cam_top"]),
                  captions=o.get("captions", True), status="queued", version=0, pick=pick)
         # Only the gameplay layout uses a webcam, so it is only looked for then, and only once: a
         # stream with no webcam is not looked for again on every clip of it.

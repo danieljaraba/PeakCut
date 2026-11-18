@@ -14,7 +14,7 @@ def _root() -> Path:
 
 _lock = threading.RLock()
 
-DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "captions": True, "min_len": 15, "max_len": 60,
+DEFAULTS = {"name": "", "channel": "", "style": "bounce", "layout": "blur", "cam_side": "right", "cam_top": 20, "captions": True, "min_len": 15, "max_len": 60,
             "max_clips": 6, "min_score": 80, "auto_watch": False, "buffer_min": 20, "live_per_hour": 4, "ai_every_min": 3, "ai_only_on_spike": True, "auto_jump_pct": 60,
             "plan": "free", "decide_mode": "both", "must_clip_min": 0, "min_gap_min": 2,
             "game": "", "language": "auto",
@@ -42,7 +42,8 @@ def _fix(c: dict) -> dict:
         c["channel"] = next((ch[k] for k in PLATFORMS if k in ch), "")
     return c
 NUMERIC = {"min_len": (5, 120), "max_len": (10, 180), "max_clips": (1, 20), "min_score": (0, 100), "buffer_min": (5, 120), "live_per_hour": (1, 60), "ai_every_min": (1, 30), "auto_jump_pct": (20, 300), "must_clip_min": (0, 240), "min_gap_min": (0, 60),
-           "post_min_score": (0, 100), "post_gap_min": (5, 1440), "daily_cap": (1, 50)}
+           "post_min_score": (0, 100), "post_gap_min": (5, 1440), "daily_cap": (1, 50),
+           "cam_top": (3, 60)}   # where the webcam's top edge sits in the gameplay layout, percent of the height
 
 
 def root(cid) -> Path:
@@ -82,6 +83,8 @@ def _clean(data: dict) -> dict:
             v = v if v in ("auto", "en", "es") else "auto"
         elif k == "privacy":
             v = v if v in ("public", "unlisted", "private") else "public"
+        elif k == "cam_side":
+            v = v if v in ("left", "right") else "right"
         else:
             v = str(v).strip()[:300]
         out[k] = v
