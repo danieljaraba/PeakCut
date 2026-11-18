@@ -639,8 +639,9 @@ before that second. End the clip before the word "clip": never include it, or an
 FACE_CAM = """One frame of a gaming stream is attached.
 
 A streamer often puts a small picture of their own webcam in a corner of the stream, next to the game.
-Is the streamer's own face on this frame? A real person, filmed by a camera, sitting in a room. Not a
-character in the game, not a picture inside a game menu, not someone in a video the game is playing.
+Is the streamer's own face on this frame? A real person, filmed by a camera, sitting in a room, or the
+streamer's own animated avatar (a VTuber) in a box of its own over the game. Not a character in the game,
+not a picture inside a game menu, not someone in a video the game is playing.
 
 Answer in one line and nothing else:
   CAM x=..% y=..% w=..% h=..%     the webcam picture, as parts of the whole frame; x,y is its top left corner

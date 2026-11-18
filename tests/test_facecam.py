@@ -48,8 +48,12 @@ def cam_picture(w, h):
 PANEL = "color=c=0x203040:size=300x150:rate=25"
 
 
-def stream(name, cam=None, hud=None, frames=36):
-    """A stream drawn picture by picture: see the test that uses it."""
+def stream(name, cam=None, hud=None, frames=36, kind="sway"):
+    """A stream drawn picture by picture: see the tests that use it.
+
+    `kind` is what is in the webcam: "sway", a person who sways all the time; "room", no border round the
+    picture, a door frame and a shelf in the room behind, and a person who only moves now and then;
+    "avatar", a drawn character in a red frame that only opens its mouth now and then."""
     import numpy as np
     from PIL import Image, ImageDraw, ImageFilter
     rng = np.random.default_rng(7)
@@ -59,19 +63,31 @@ def stream(name, cam=None, hud=None, frames=36):
     for _ in range(700):
         x, y, s = int(rng.integers(0, 2400)), int(rng.integers(0, 1400)), int(rng.integers(10, 200))
         c = tuple(int(v) for v in rng.integers(0, 256, 3))
-        kind = int(rng.integers(0, 4))
-        if kind == 0:
+        shape = int(rng.integers(0, 4))
+        if shape == 0:
             d.rectangle([x, y, x + s, y + int(rng.integers(10, 200))], fill=c)
-        elif kind == 1:
+        elif shape == 1:
             d.ellipse([x, y, x + s, y + s], fill=c)
-        elif kind == 2:
+        elif shape == 2:
             d.line([x, y, x, y + 3 * s], fill=c, width=4)       # long straight walls, which move as it pans
         else:
             d.line([x, y, x + 3 * s, y], fill=c, width=4)
     world = world.filter(ImageFilter.GaussianBlur(1))
     if cam:
         room = Image.new("RGB", cam[2:], (90, 80, 70))
-        ImageDraw.Draw(room).rectangle([0, cam[3] * 3 // 4, cam[2], cam[3]], fill=(50, 40, 40))
+        rd = ImageDraw.Draw(room)
+        rd.rectangle([0, cam[3] * 3 // 4, cam[2], cam[3]], fill=(50, 40, 40))
+        if kind == "room":
+            door = cam[2] * 6 // 10                                    # a door frame: a still line inside the picture
+            rd.rectangle([door, 0, door + 5, cam[3]], fill=(235, 235, 225))
+            rd.rectangle([door + 25, cam[3] // 5, cam[2] - 15, cam[3] // 5 + 8], fill=(150, 30, 30))   # a shelf
+            rd.rectangle([door + 30, cam[3] // 5 - 30, door + 50, cam[3] // 5], fill=(30, 60, 200))
+        if kind == "avatar":
+            room = Image.new("RGB", cam[2:], (60, 60, 110))
+            rd = ImageDraw.Draw(room)
+            rd.ellipse([cam[2] * 0.25, cam[3] * 0.15, cam[2] * 0.75, cam[3] * 0.85], fill=(200, 160, 200))
+            rd.ellipse([cam[2] * 0.35, cam[3] * 0.35, cam[2] * 0.45, cam[3] * 0.45], fill=(20, 20, 20))
+            rd.ellipse([cam[2] * 0.55, cam[3] * 0.35, cam[2] * 0.65, cam[3] * 0.45], fill=(20, 20, 20))
     path = os.path.join(work, name)
     enc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{fw}x{fh}",
                             "-r", "3", "-i", "-", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", path],
@@ -90,15 +106,32 @@ def stream(name, cam=None, hud=None, frames=36):
         if cam:
             x, y, w, h = cam
             me = room.copy()
-            cx, cy, r = w * (0.5 + 0.08 * np.sin(t)), h * 0.45, h * 0.17
-            ImageDraw.Draw(me).ellipse([cx - r, cy - r, cx + r, cy + r], fill=(220, 170, 140))
-            ImageDraw.Draw(me).ellipse([cx - 2 * r, cy + r, cx + 2 * r, cy + 4 * r], fill=(40, 60, 120))
+            md = ImageDraw.Draw(me)
+            now = i % 9 in (0, 1)                                       # the moments something moves
+            if kind == "avatar":
+                if now:
+                    md.ellipse([w * 0.44, h * 0.60, w * 0.56, h * 0.70], fill=(120, 20, 40))   # the mouth opens
+            else:
+                if kind == "room":
+                    cx, cy, r = w * (0.3 + 0.028 * np.sin(t * 0.7)), h * 0.45, h * 0.17       # sits and shifts a little
+                else:
+                    cx, cy, r = w * (0.5 + 0.08 * np.sin(t)), h * 0.45, h * 0.17
+                md.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(220, 170, 140))
+                md.ellipse([cx - 2 * r, cy + r, cx + 2 * r, cy + 4 * r], fill=(40, 60, 120))
             im.paste(me, (x, y))
-            d.rectangle([x, y, x + w - 1, y + h - 1], outline=(160, 60, 220), width=2)
+            if kind == "avatar":
+                d.rectangle([x, y, x + w - 1, y + h - 1], outline=(230, 20, 20), width=4)
+            elif kind == "sway":
+                d.rectangle([x, y, x + w - 1, y + h - 1], outline=(160, 60, 220), width=2)
         enc.stdin.write(np.asarray(im, dtype=np.uint8).tobytes())
     enc.stdin.close()
     enc.wait()
     return path
+
+
+def brain_prompt():
+    from studio import brain
+    return brain.FACE_CAM
 
 
 def jobs_facecam(job):
@@ -184,6 +217,23 @@ try:
           ((box or {}).get("corner"), (box or {}).get("conf")), ("top-right", "high"))
     check("and its box is the webcam picture, to a few pixels",
           all(abs((box or {}).get(k, -99) - v) <= 6 for k, v in zip("xywh", (700, 0, 260, 195))), True)
+    # ---- a webcam with no border, with a door frame in the room behind the streamer: the still line of the
+    # door is inside the picture, and the box must not stop there and cut off the rest of the picture
+    room = stream("room.mp4", cam=(600, 80, 300, 200), hud=(15, 15, 200, 110), kind="room")
+    box = facecam.detect(room)
+    check("a webcam with a door frame behind the streamer is found to its real edge, not the door",
+          ([abs((box or {}).get(k, -99) - v) <= 6 for k, v in zip("xywh", (600, 80, 300, 200))], (box or {}).get("conf")),
+          ([True] * 4, "high"))
+
+    # ---- a streamer shown as a drawn character (a VTuber) in a red frame, who only moves the mouth now and then
+    avatar = stream("avatar.mp4", cam=(10, 300, 180, 150), hud=(700, 15, 220, 120), kind="avatar")
+    box = facecam.detect(avatar)
+    check("a drawn character in a frame in the corner counts as the streamer's camera",
+          ([abs((box or {}).get(k, -99) - v) <= 6 for k, v in zip("xywh", (10, 300, 180, 150))], (box or {}).get("conf")),
+          ([True] * 4, "high"))
+
+    check("the AI is told a streamer's drawn character counts as the webcam", "avatar" in brain_prompt(), True)
+
     real2 = stream("real2.mp4", cam=None, hud=(15, 15, 240, 140))
     check("a stream with only a scoreboard has no webcam to use",
           (facecam.detect(real2) or {}).get("conf", "none") != "high", True)
