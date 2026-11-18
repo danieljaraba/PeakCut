@@ -50,8 +50,9 @@ funny moments, fails, clutch plays, rage, shock, hot takes, or a short story wit
 RULES = """
 Rules:
 - Each clip is {min_len} to {max_len} seconds. Use the [seconds] values for start and end.
-- Start on the setup line, not mid-sentence. End right after the payoff or reaction, on the last word of a
-  complete sentence: never in the middle of a sentence or a thought. The clip must make sense on its own.
+- Start at the beginning of a sentence, as late as possible while the clip still makes sense on its own: the
+  first 3 seconds must already be interesting. End right after the payoff or the reaction to it (a laugh, a
+  shout), on the last word of a complete sentence: never in the middle of a sentence or a thought.
 - Do not pick intros, sponsor reads, "like and subscribe", or dead air.
 - Skip weak moments. Fewer strong clips beat many weak ones. Return [] if nothing is worth clipping.
 - score: 0-100, how likely a stranger keeps watching. Be honest; most clips are 50-80.
@@ -267,28 +268,74 @@ def ask_ai(prompt, schema=None, purpose="AI call", timeout=None):
     raise RuntimeError(f"The AI did not answer: {ai.explain(last) or last}")
 
 
-def sentence_ends(words) -> list:
-    """The moments a sentence finishes. In our own transcript that is a word ending in . ? or !; YouTube's
-    transcript has no punctuation, so there it is a pause in the talking."""
+def _last_words(words) -> list:
+    """The number of each word that finishes a sentence. In our own transcript that is a word ending in . ? or !;
+    YouTube's transcript has no punctuation, so there it is a pause in the talking."""
     punctuated = sum(1 for w in words if w["w"][-1:] in ".?!\u0964\u061f") >= max(2, len(words) // 80)
     out = []
     for i, w in enumerate(words):
         gap = (words[i + 1]["s"] - w["e"]) if i + 1 < len(words) else 9.0
         if (punctuated and w["w"][-1:] in ".?!\u0964\u061f") or gap >= (1.0 if punctuated else 0.5):
-            out.append(w["e"])
+            out.append(i)
     return out
 
 
-def _snap(clip, lines, words, min_len, max_len, duration):
-    """Start at the beginning of a line and end where a sentence ends, inside the allowed length. A clip that stops
-    in the middle of a sentence feels cut off, so the sentence being said at the chosen end is finished; if that
-    would take too long, the clip ends at the sentence before."""
+def sentence_ends(words) -> list:
+    """The moments a sentence finishes."""
+    return [words[i]["e"] for i in _last_words(words)]
+
+
+def sentence_starts(words) -> list:
+    """The moments a sentence begins: the first word, and every word right after a sentence finished."""
+    if not words:
+        return []
+    return [words[0]["s"]] + [words[i + 1]["s"] for i in _last_words(words) if i + 1 < len(words)]
+
+
+REACTION_JUMP = 0.4     # 40% louder than usual counts as a reaction (a laugh, a shout) worth keeping
+REACTION_MAX = 3.0      # ...for at most this many seconds after the last word
+
+
+def _start_of(s, lines, words):
+    """Where a clip should really start, near the start the AI chose.
+
+    At the beginning of a sentence: if the AI started in the middle of one, the clip goes back to where that
+    sentence began (a clip that opens mid-sentence feels like it was cut from something). Otherwise the nearest
+    sentence start, or line start, close by. And no silence in front: if nothing is said for more than 0.6 s
+    after the start, the clip starts just before the first word instead."""
+    starts, ends = sentence_starts(words), sentence_ends(words)
+    before = [x for x in starts if x <= s + 0.3]
+    if before:
+        p = before[-1]
+        done = next((x for x in ends if x >= p), None)        # where the sentence that starts there finishes
+        if done is not None and done > s and s - p <= 8:
+            return _no_silence(p, words)
+    near = [x for x in starts if abs(x - s) <= 4] or [l["s"] for l in lines if abs(l["s"] - s) <= 4]
+    if near:
+        s = min(near, key=lambda x: abs(x - s))
+    return _no_silence(s, words)
+
+
+def _no_silence(s, words):
+    """No dead air in front of the first word."""
+    first = next((w["s"] for w in words if w["s"] >= s - 0.01), None)
+    if first is not None and first - s > 0.6:
+        s = first - 0.15             # the clip itself starts 0.15 s before this, so 0.3 s before the first word
+    return s
+
+
+def _snap(clip, lines, words, min_len, max_len, duration, loud=None):
+    """Start at the beginning of a sentence and end where a sentence ends, inside the allowed length. A clip that
+    stops in the middle of a sentence feels cut off, so the sentence being said at the chosen end is finished; if
+    that would take too long, the clip ends at the sentence before.
+
+    `loud`, when given, is how much louder than usual each second is (relative_loudness, on the same clock as the
+    words). Then a laugh or a shout right after the last word is kept: while it stays 40% louder than usual and
+    nobody starts a new sentence, the clip runs on, for 3 seconds at most and never past the longest allowed."""
     s, e = _num(clip.get("start"), -1), _num(clip.get("end"), -1)
     if s < 0 or e <= s:
         return 0.0, 0.0          # not a usable answer: callers drop it on the minimum-length check
-    starts = [l["s"] for l in lines if abs(l["s"] - s) <= 4]
-    if starts:
-        s = min(starts, key=lambda x: abs(x - s))
+    s = _start_of(s, lines, words)
     lo, hi = s + min_len, min(s + max_len, duration)
     stops = [x for x in sentence_ends(words) if lo <= x <= hi]
     if stops:
@@ -303,7 +350,16 @@ def _snap(clip, lines, words, min_len, max_len, duration):
     # a short breath after the last word, but never into the next sentence
     nxt = next((w["s"] for w in words if w["s"] > e - 0.01), None)
     tail = 0.35 if nxt is None else min(0.35, max(0.08, nxt - e - 0.05))
-    return round(max(0.0, s - 0.15), 2), round(min(duration, e + tail), 2)
+    start = round(max(0.0, s - 0.15), 2)
+    if loud is not None and len(loud):
+        # the reaction: whole seconds that stay loud, from the one the last word ends in
+        limit = min(e + REACTION_MAX, start + max_len, duration, (nxt - 0.05) if nxt is not None else math.inf)
+        sec = int(e + 0.3)
+        while sec < len(loud) and sec < limit and loud[sec] >= REACTION_JUMP:
+            sec += 1
+        if min(sec, limit) > e + tail:
+            return start, round(min(sec, limit), 2)
+    return start, round(min(duration, e + tail), 2)
 
 
 def fallback_by_loudness(db, words, n, max_len, duration):
@@ -400,7 +456,7 @@ def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=
         note = "The AI was unavailable, so clips were picked by loudness only."
     clips = []
     for c in sorted(found, key=lambda c: -_num(c.get("score"))):
-        s, e = _snap(c, lines, words, min_len, max_len, duration)
+        s, e = _snap(c, lines, words, min_len, max_len, duration, loud=loud if len(loud) else None)
         if e - s < min(min_len, duration) - 1:
             continue
         if _overlaps(s, e, clips):
@@ -483,12 +539,16 @@ Channel: {uploader}
 
 The transcript covers seconds {start:.0f} to {now:.0f}. If a moment is still unfolding at the very end, leave it out;
 you will see it again in the next check.
-{must}
+{must}{said_note}
 Pick up to {n} moments that would work as standalone clips for someone who has never seen the stream:
 funny moments, fails, clutch plays, rage, shock, hot takes, or a short story with a payoff.
 """
 MUST_PICK = "This time you MUST return the single best moment in this stretch, even if it is only decent."
 NOT_MUST = "Most checks should return []. Only return a moment you would stop scrolling for."
+SAID_NOTE = """
+Someone said "clip" at second {t:.0f}. People say it right after something worth clipping, so the moment is just
+before that second. End the clip before the word "clip": never include it, or anything said after it.
+"""
 
 FACE_CAM = """One frame of a gaming stream is attached.
 
@@ -545,20 +605,34 @@ SIG_SCHEMA = {
 }
 
 
+def before_said(words, said_at):
+    """The words spoken before someone said "clip" (or the creator's own phrase) at `said_at`: a clip cut from
+    them ends before the phrase, and the last word before it counts as the end of a sentence."""
+    return [w for w in words if w["s"] < said_at - 0.01]
+
+
 def judge_transcript(words, start, now, title="", uploader="", min_len=15, max_len=60, existing=(), n=2, must=False,
-                    game=None, timeout=None):
-    """Judge 1: words only. Returns (clips, tokens)."""
+                    game=None, timeout=None, loud=None, said_at=None):
+    """Judge 1: words only. Returns (clips, tokens).
+
+    `loud` is how much louder than usual each second of the stream is (relative_loudness), used to keep the
+    reaction at the end of a clip. `said_at` is when someone said "clip", if that is why this check runs."""
     lines = make_lines(words)
     if len(lines) < 3:
         return [], 0
+    said_note = SAID_NOTE.format(t=said_at) if said_at is not None else ""
     prompt = (TRANSCRIPT_JUDGE.format(title=_safe(title) or "unknown", uploader=_safe(uploader) or "unknown", start=start, now=now,
-                                      n=n, must=MUST_PICK if must else NOT_MUST)
+                                      n=n, must=MUST_PICK if must else NOT_MUST, said_note=said_note)
               + _game_rules(game)
               + RULES.format(min_len=min_len, max_len=max_len, transcript=_fmt(lines)))
     out, _model, spent = ask_ai(prompt, purpose="Live: words judge", timeout=timeout)
+    stop = now
+    if said_at is not None:      # the clip is cut from what was said before "clip", never from the word itself
+        words, stop = before_said(words, said_at), min(now, said_at - 0.05)
+        lines = make_lines(words)
     clips = []
     for c in sorted((c for c in out if isinstance(c, dict)), key=lambda c: -_num(c.get("score"))):
-        s, e = _snap(c, lines, words, min_len, max_len, now)
+        s, e = _snap(c, lines, words, min_len, max_len, stop, loud=loud)
         if e - s < min_len - 1 or _overlaps(s, e, list(existing) + clips):
             continue
         clips.append(_tidy(c, s, e, game))

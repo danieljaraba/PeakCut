@@ -61,6 +61,7 @@ def main() -> int:
                 ("ad breaks and frozen screens", ["tests/test_static.py"]),
                 ("a live recording keeps growing after a Twitch advert", ["tests/test_live_ad.py"]),
                 ("choosing the best clips of the whole video, and the signals the AI reads", ["tests/test_selection.py"]),
+                ("where clips start and stop, live triggers, sharper picture, even sound", ["tests/test_cuts.py"]),
                 ("answers that are not quite right", ["tests/test_answer.py"]),
                 ("knowing which game a stream is", ["tests/test_games.py"]),
                 ("finding the facecam in a gaming stream", ["tests/test_facecam.py"]),

@@ -1,4 +1,6 @@
 """Turns a time range into a vertical clip: 9:16 layout, bouncy word captions, hook title, cover."""
+import json
+import math
 import re
 import shutil
 import subprocess
@@ -233,6 +235,8 @@ PIP_MARGIN = 26
 
 
 def _filter(layout, fg_h, facecam=None):
+    # The picture people look at is enlarged with the "lanczos" filter, which keeps edges and text sharper than
+    # the default when a small stream is blown up to a phone screen. The blurred background does not need it.
     if layout == "gameplay" and facecam:
         # The game fills the screen, and the webcam sits in the top corner of it, so a viewer sees
         # the play and the face at the same time.
@@ -240,15 +244,15 @@ def _filter(layout, fg_h, facecam=None):
         if fw > 8 and fh > 8:
             pip_h = max(2, int(round(PIP_W * fh / fw)))
             return (f"[0:v]fps={config.OUT_FPS},split=2[base][fc];"
-                    f"[base]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[b];"
-                    f"[fc]crop={fw}:{fh}:{fx}:{fy},scale={PIP_W}:{pip_h},setsar=1[p];"
+                    f"[base]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1[b];"
+                    f"[fc]crop={fw}:{fh}:{fx}:{fy},scale={PIP_W}:{pip_h}:flags=lanczos,setsar=1[p];"
                     f"[b][p]overlay={W - PIP_W - PIP_MARGIN}:{PIP_MARGIN}[v0];")
     if layout == "crop" or (layout == "gameplay" and not facecam):
-        return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[v0];"
+        return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1[v0];"
     return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
             f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=6:2,"
             f"scale={W}:{H},eq=brightness=-0.14:saturation=1.15[bg];"
-            f"[b]scale={W}:{fg_h}:force_original_aspect_ratio=increase,crop={W}:{fg_h}[fg];"
+            f"[b]scale={W}:{fg_h}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{fg_h}[fg];"
             f"[bg][fg]overlay=0:(H-h)/2,setsar=1[v0];")
 
 
@@ -258,6 +262,35 @@ def _hook_y(layout, hook_y, facecam=None):
     if layout == "gameplay" and facecam and len(facecam) == 4 and facecam[2] > 8:
         return PIP_MARGIN + int(round(PIP_W * facecam[3] / facecam[2])) + 32
     return hook_y
+
+
+LOUDNESS = "I=-14:TP=-1.5:LRA=11"      # how loud a finished clip is: the level the short-video apps play at
+
+
+def _loudnorm(src, start, end) -> str:
+    """The sound filter for a clip: every clip comes out about equally loud.
+
+    Done in two passes. First the clip's sound is only listened to, to measure how loud it is; then it is turned
+    up or down by that one fixed amount. Done in one pass, the level is guessed while playing and keeps being
+    corrected, which you hear as the volume pumping up and down in a short clip. If the measuring fails for any
+    reason, the one-pass way is used, as before."""
+    plain = f"loudnorm={LOUDNESS}"
+    try:
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}",
+                            "-i", str(src), "-map", "0:a:0", "-vn", "-af", f"{plain}:print_format=json", "-f", "null", "-"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                           timeout=120)
+        found = re.findall(r"\{[^{}]*\}", p.stderr or "")
+        if p.returncode != 0 or not found:
+            return plain
+        m = json.loads(found[-1])
+        v = [float(m[k]) for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")]
+        if not all(math.isfinite(x) for x in v):      # a silent clip measures as "-inf": nothing to go by
+            return plain
+    except Exception:  # noqa: BLE001
+        return plain
+    return (f"{plain}:measured_I={v[0]:.2f}:measured_TP={v[1]:.2f}:measured_LRA={v[2]:.2f}"
+            f":measured_thresh={v[3]:.2f}:offset={v[4]:.2f}:linear=true")
 
 
 _qsv_ok = None
@@ -294,7 +327,7 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
         shutil.copyfile(f, work / "f" / f.name)
     fc = _filter(layout, fg_h, face) + f"[v0]ass={name}.ass:fontsdir=f[v]"
     base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
-            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", _loudnorm(src, start, end),
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
     encoders = []
     if _qsv_ok is not False:

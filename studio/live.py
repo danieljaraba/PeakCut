@@ -205,7 +205,7 @@ class Session:
         self.facecam_checked = False  # the look is made once, even when it finds nothing
         self.ai_busy = 0.0            # when the AI check now running was started, 0 when none is
 
-    def _ask_ai(self, window=None, why=None):
+    def _ask_ai(self, window=None, why=None, said=None):
         """Ask the AI on its own thread, so a slow answer never stops the recording.
 
         While the AI thinks, the speech keeps being written and a "clip that" still works. One check
@@ -217,7 +217,7 @@ class Session:
 
         def work():
             try:
-                self._ai_check(window, why)
+                self._ai_check(window, why, said)
             except Exception as e:  # noqa: BLE001
                 self.job["ai"]["last_error"] = str(e)[-200:]
             finally:
@@ -483,9 +483,10 @@ class Session:
             self.last_spike = n
             self.spikes += 1
 
-    def _ai_check(self, window=None, why=None):
+    def _ai_check(self, window=None, why=None, said=None):
         """Judge 1 reads only the words. If it finds a moment, judge 2 reads only the loudness and chat activity
-        for the same stretch, without seeing the words. A clip is made when both say yes (or as set in Setup)."""
+        for the same stretch, without seeing the words. A clip is made when both say yes (or as set in Setup).
+        `said` is the second someone said "clip", when that is why this check runs: the clip then ends before it."""
         st = self.settings
         every = int(st.get("ai_every_min", 3)) or 3
         if window:                    # just the stretch around a jump, or around someone saying "clip"
@@ -510,7 +511,8 @@ class Session:
         try:
             cands, tok = brain.judge_transcript(win, ws, now, title, up, st["min_len"], st["max_len"], self.job["clips"],
                                                 n=1 if every <= 2 else 2, must=must, game=self._game(),
-                                                timeout=config.LIVE_AI_TIMEOUT)  # Auto (0) asks for one
+                                                timeout=config.LIVE_AI_TIMEOUT,  # Auto (0) asks for one
+                                                loud=self._loudness(), said_at=said)
         except Exception as e:  # noqa: BLE001
             self.job["ai"]["last_error"] = str(e)[-200:]
             return self._verdict(verdict, "AI error: " + str(e)[-80:])
@@ -547,7 +549,7 @@ class Session:
                 self.rejected += 1
                 self._verdict(verdict, "Reaction judge said no, not clipped")
                 continue
-            if any(abs(c["start"] - k["start"]) < st["min_gap_min"] * 60 for k in self.job["clips"]):
+            if self._too_close(c):
                 self._verdict(verdict, "Too close to the last clip")
                 continue
             why = "Both judges agreed" if both else ("Words judge was very sure" if c["score"] >= 90 and
@@ -560,6 +562,24 @@ class Session:
             must = False
             if added >= (1 if every <= 2 else 2):
                 break
+
+    def _too_close(self, c):
+        """A new clip is not made when it covers part of a clip already made (the same moment twice), or when it
+        ends less than the "minimum gap" from Setup away from where another clip ends. Two clips that end close
+        together are usually the same payoff with a different lead-in; two separate moments a minute and a half
+        apart are both kept when the gap allows it."""
+        gap = self.settings.get("min_gap_min", 2) * 60
+        for k in self.job["clips"]:
+            shared = min(c["end"], k["end"]) - max(c["start"], k["start"])
+            if shared > 0.5 or abs(c["end"] - k["end"]) < gap:
+                return True
+        return False
+
+    def _loudness(self):
+        """How much louder than usual each second of the stream has been, for keeping a reaction at a clip's end."""
+        with self.lock:
+            db = np.array(self.db, dtype=np.float32)
+        return brain.relative_loudness(db) if len(db) else None
 
     def _verdict(self, v, result):
         self.verdicts.append(dict(v, result=result))
@@ -588,7 +608,10 @@ class Session:
                     t = new_words[i]["s"]
                     if t - self.last_trigger > 45:
                         self.last_trigger = t
-                        self.manual.append({"start": max(0.0, t - 30), "end": t + 2, "why": f'Someone said "{p}"'})
+                        # the moment is the half minute before the phrase; its exact edges are found once the
+                        # words are in (see _manual_step)
+                        self.manual.append({"start": max(0.0, t - 30), "end": t + 2, "why": f'Someone said "{p}"',
+                                            "said_at": t})
 
     def _manual_step(self):
         for req in [m for m in self.manual if m["end"] <= self.t_done or self.ended]:
@@ -603,10 +626,27 @@ class Session:
                 c = {"score": 0, "category": "other", "hook": "", "title": self.job["title"],
                      "description": "", "hashtags": [], "highlight_words": []}
             self.manual.remove(req)
-            c.update(start=round(req["start"], 2), end=round(min(req["end"], self.samples / SR), 2), score=0)
+            start, end = req["start"], req["end"]
+            if req.get("said_at") is not None:
+                start, end = self._phrase_edges(req["start"], req["said_at"], start, end)
+            c.update(start=round(start, 2), end=round(min(end, self.samples / SR), 2), score=0)
             if req.get("why"):
                 c["reason"] = req["why"]
             self._add_clip(c)
+
+    def _phrase_edges(self, start, said_at, s0, e0):
+        """The edges of a clip asked for with the creator's own phrase: starting where a sentence starts and
+        ending before the phrase, with the laugh or shout before it kept, like the clips the AI picks. If the
+        words do not allow a clip of the shortest length, the plain half minute before the phrase is used."""
+        st = self.settings
+        with self.lock:
+            near = [w for w in self.words if start - 10 <= w["s"] < said_at + 1]
+        words = brain.before_said(near, said_at)
+        s, e = brain._snap({"start": start, "end": said_at}, brain.make_lines(words), words, st["min_len"],
+                           st["max_len"], said_at - 0.05, loud=self._loudness())
+        if e - s < min(st["min_len"], said_at - start) - 1:
+            return s0, e0
+        return s, e
 
     def _add_clip(self, c):
         self.n += 1
@@ -736,7 +776,7 @@ class Session:
                     pass
                 elif said and (self.t_done >= said["t"] + self.SAID_AFTER or (self.ended and not busy)):
                     self.said = None
-                    self._ask_ai((said["t"] - self.SAID_BEFORE, said["t"] + self.SAID_AFTER), said["why"])
+                    self._ask_ai((said["t"] - self.SAID_BEFORE, said["t"] + self.SAID_AFTER), said["why"], said["t"])
                 elif sp and (self.t_done >= sp["t"] + self.AUTO_AFTER or (self.ended and not busy)):
                     self.spike = None
                     self._ask_ai((sp["t"] - self.AUTO_BEFORE, sp["t"] + self.AUTO_AFTER), "Jump: " + sp["why"])
