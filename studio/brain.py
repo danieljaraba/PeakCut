@@ -212,7 +212,9 @@ def relative_loudness(db, base_sec=180):
         return np.zeros(0, dtype=np.float32)
     amp = 10 ** (db / 20)                                   # level as plain amplitude, so a percentage means something
     pad = np.concatenate([amp[:1], amp, amp[-1:]])
-    now = (pad[:-2] + pad[1:-1] + pad[2:]) / 3              # each second with the one before and after
+    # Each second with the one before and after, so a single crackle does not count; but never louder than the
+    # second itself, so a quiet second right after a shout is not counted as part of the shout.
+    now = np.minimum((pad[:-2] + pad[1:-1] + pad[2:]) / 3, amp)
     csum = np.concatenate([[0.0], np.cumsum(amp)])
     t = np.arange(n)
     hi = t - 10                                             # the ten seconds just before are left out
