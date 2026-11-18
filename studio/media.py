@@ -119,9 +119,34 @@ def info(url: str) -> dict:
     """Title, channel and length, without downloading anything."""
     with _youtube_guard(url), _ydl({}) as ydl:
         i = ydl.extract_info(url, download=False)
+    return _summary(i)
+
+
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and abs(f) != float("inf") else None
+
+
+def _summary(i: dict) -> dict:
+    """The parts of a link's details that PeakCut uses. Besides title and length: YouTube's "most replayed"
+    graph (heatmap: which stretches viewers watched again, 0 to 1) and the video's chapters, when it has them.
+    Both are free (they come with the details) and both may be missing: then they are empty lists."""
+    heat = []
+    for h in (i.get("heatmap") or [])[:400] if isinstance(i.get("heatmap"), list) else []:
+        if isinstance(h, dict) and None not in (_num(h.get("start_time")), _num(h.get("end_time")), _num(h.get("value"))):
+            heat.append({"start_time": _num(h["start_time"]), "end_time": _num(h["end_time"]), "value": _num(h["value"])})
+    chapters = []
+    for c in (i.get("chapters") or [])[:200] if isinstance(i.get("chapters"), list) else []:
+        if isinstance(c, dict) and _num(c.get("start_time")) is not None and str(c.get("title") or "").strip():
+            chapters.append({"start_time": _num(c["start_time"]), "end_time": _num(c.get("end_time")),
+                             "title": str(c["title"])[:100]})          # text from the video: untrusted
     return {"title": i.get("title") or "", "uploader": i.get("uploader") or i.get("channel") or "",
             "duration": float(i.get("duration") or 0), "is_live": bool(i.get("is_live")),
-            "thumbnail": i.get("thumbnail") or "", "kind": i.get("_type") or "video"}
+            "thumbnail": i.get("thumbnail") or "", "kind": i.get("_type") or "video",
+            "heatmap": heat, "chapters": chapters}
 
 
 def youtube_words(url: str):
