@@ -11,7 +11,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import brain, config, creators, ctx, facecam, games, load, media, quality, render, roman, safe, transcribe, usage
+from . import brain, config, creators, ctx, disk, facecam, games, load, media, quality, render, roman, safe, transcribe, usage
 
 class _FairQueue:
     """Whose video is next. Each person has their own line and the lines take turns, so someone who adds ten
@@ -178,9 +178,7 @@ def save(job):
                 time.sleep(0.05)
         else:
             return
-        tmp = d / "job.json.tmp"
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(d / "job.json")
+        disk.write_text(d / "job.json", text)    # safe even if the computer switches off right now
 
 
 def _set(job, **kw):
@@ -394,7 +392,7 @@ def render_one(job, clip, words):
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
         post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
-        (d / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
+        disk.write_text(d / "clips" / f"{clip['id']}.json", json.dumps(post, indent=1))
         if clip["version"] == 1:
             clip.setdefault("made_at", time.time())
             creators.log(job["creator"], f"Clip ready (score {clip['score']}): {clip['title'] or clip['hook']}")
@@ -806,7 +804,7 @@ def _run_job(job):
             bw = heard.pop(bi).result()
         _set(job, progress=max(job["progress"], 0.14 + 0.78 * (b - lo) / max(1, hi - lo)))
         words += [dict(w, s=round(w["s"] + shift, 2), e=round(w["e"] + shift, 2)) for w in bw]
-        (d / "words.json").write_text(json.dumps(words), encoding="utf-8")
+        disk.write_text(d / "words.json", json.dumps(words))
         _set(job, stage="Finding the best moments" + where, word_count=len(words))
         end = b / 16000
         if len(bw) < 8 and not rewatched[int(shift): int(end) + 1].any():
@@ -862,7 +860,7 @@ def _run_job(job):
         for a_s, b_s, tw in exact.values():
             words = [w for w in words if not a_s <= w["s"] < b_s] + tw
         words.sort(key=lambda w: w["s"])
-        (d / "words.json").write_text(json.dumps(words), encoding="utf-8")
+        disk.write_text(d / "words.json", json.dumps(words))
     renders.shutdown(wait=False)
     ahead.shutdown(wait=False)
     fetch.shutdown(wait=False)

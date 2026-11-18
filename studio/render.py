@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import config, roman
+from . import config, disk, roman
 from .media import NO_WINDOW, run
 
 W, H = config.OUT_W, config.OUT_H
@@ -351,4 +351,5 @@ def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layo
          "-q:v", "3", f"{name}.jpg"], cwd=work)
     for ext in ("mp4", "jpg", "ass"):
         shutil.move(str(work / f"{name}.{ext}"), str(out_dir / f"{name}.{ext}"))
+        disk.flush(out_dir / f"{name}.{ext}")   # a clip finished just before the computer switches off is kept whole
     return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": layout}

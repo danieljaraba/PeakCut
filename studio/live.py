@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
+from . import alerts, auth, brain, config, creators, ctx, disk, facecam, games, jobs, load, media, transcribe, usage
 
 # ":username!user@host PRIVMSG #channel :the message"
 _NICK = re.compile(r"(?m)^:([A-Za-z0-9_]{2,25})!")
@@ -449,7 +449,7 @@ class Session:
             self.words += words
             self.t_done = self.pending_base / SR
         self._triggers(words)
-        (self.dir / "words.json").write_text(json.dumps(self.words), encoding="utf-8")
+        disk.write_text(self.dir / "words.json", json.dumps(self.words))
         return True
 
     AUTO_BEFORE, AUTO_AFTER, AUTO_GAP = 30, 20, 60   # seconds of stream sent around a jump; least time between jumps
