@@ -74,9 +74,15 @@ Rules:
 - hook_at: the [seconds] where the moment first gets interesting. payoff_at: the [seconds] of the punchline or of
   the reaction to it.
 - hook: at most 5 words, ALL CAPS, shown as big text on the video. Curiosity, but true to what happens.
-- title: at most 70 characters, for the post.
+- title: at most 70 characters, for the post. Not a flat summary of the topic ("Streamer plays a game"): take the
+  funniest, most surprising or most quotable thing that happens or is said in THIS clip (the punchline, the
+  reaction, the absurd detail) and build the title around it, so a stranger wants to see it. Stay true to what
+  happens: never invent or promise something the clip does not show.
 - description: one or two sentences.
-- hashtags: 5 tags without the # sign.
+- hashtags: 5 to 8 tags without the # sign. Include a tag for the creator (the channel name, as one word) and one
+  for each other person who takes part in the clip and is named in the video title or in the transcript
+  (guests, friends, people the streamer plays or talks with). Use only names that are really there: never guess a
+  person. Then fill up with tags for the game or the topic.
 - highlight_words: 3 to 6 single words spoken in the clip that carry the punch.
 {write_in}
 - category: one of funny, fail, clutch, rage, shock, take, story, other.
@@ -784,9 +790,15 @@ Channel: {uploader}
 {extra}
 Rules:
 - hook: at most 5 words, ALL CAPS, shown as big text over the first seconds. Curiosity, but true to what happens.
-- title: at most 70 characters, for the post.
+- title: at most 70 characters, for the post. Not a flat summary of the topic ("Streamer plays a game"): take the
+  funniest, most surprising or most quotable thing that happens or is said in THIS clip (the punchline, the
+  reaction, the absurd detail) and build the title around it, so a stranger wants to see it. Stay true to what
+  happens: never invent or promise something the clip does not show.
 - description: one or two sentences.
-- hashtags: 5 tags without the # sign.
+- hashtags: 5 to 8 tags without the # sign. Include a tag for the creator (the channel name, as one word) and one
+  for each other person who takes part in the clip and is named in the video title or in the transcript
+  (guests, friends, people the streamer plays or talks with). Use only names that are really there: never guess a
+  person. Then fill up with tags for the game or the topic.
 - highlight_words: 3 to 6 single words spoken in the clip that carry the punch.
 {write_in}
 Return exactly one item.
